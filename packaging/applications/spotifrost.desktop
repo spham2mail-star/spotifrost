@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Spotifrost
+GenericName=Music Player
+Comment=A native Spotify client
+Exec=spotifrost %u
+Terminal=false
+Categories=AudioVideo;Audio;Player;Music;
+Keywords=spotify;music;player;streaming;spotifrost;
+Icon=spotifrost
+StartupNotify=true
+StartupWMClass=spotifrost
+MimeType=x-scheme-handler/spotify;

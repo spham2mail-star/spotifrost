@@ -1,0 +1,2248 @@
+//! The left panel: navigation and Your Library.
+
+use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Sense, Vec2, pos2, vec2};
+
+use crate::api::models::pick_image;
+use crate::app::App;
+use crate::i18n::{Locale, gettext};
+use crate::model::{Action, Dialog, DragEntry, DragTrack, Loadable, Page};
+use crate::settings::{LIKED_SONGS_KEY, LibraryShelf as Filter, LibrarySort};
+use crate::theme::{self, Icon, Palette};
+
+const COMPACT_ROW_HEIGHT: f32 = 32.0;
+
+struct Entry {
+    image: Option<String>,
+    grid_image: Option<String>,
+    name: String,
+    subtitle: String,
+    grid_subtitle: String,
+    page: Page,
+    uri: String,
+    round: bool,
+    liked: bool,
+    /// The account's own playlist: the one it may rename and delete.
+    owned: bool,
+    /// A playlist the account may drop songs on.
+    editable: bool,
+    playlist_index: Option<usize>,
+    /// A folder row: its rootlist id, whether it is rolled up, and how
+    /// many playlists it holds.
+    folder: Option<(String, bool, usize)>,
+    /// How deep inside folders the row sits, for the indent.
+    depth: u8,
+    added_at: Option<i64>,
+}
+
+impl Entry {
+    fn ordering_key(&self) -> &str {
+        if self.liked {
+            LIKED_SONGS_KEY
+        } else {
+            &self.uri
+        }
+    }
+}
+
+/// The context a library row plays, matching the cover play button and the
+/// right-click menu. Liked Songs has no URI of its own and plays the
+/// account's collection instead.
+fn entry_play_uri(app: &App, entry: &Entry) -> Option<String> {
+    if entry.liked {
+        app.user
+            .as_ref()
+            .map(|user| format!("spotify:user:{}:collection", user.id))
+    } else if entry.uri.is_empty() {
+        None
+    } else {
+        Some(entry.uri.clone())
+    }
+}
+
+fn entry_is_playing_context(entry: &Entry, context: Option<&str>) -> bool {
+    if entry.liked {
+        context.is_some_and(|context| context.ends_with(":collection"))
+    } else {
+        !entry.uri.is_empty() && context == Some(entry.uri.as_str())
+    }
+}
+
+fn cover_play_button(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    entry: &Entry,
+    index: usize,
+    cover_rect: Rect,
+    parent: &egui::Response,
+    current_context: bool,
+) -> bool {
+    let Some(uri) = entry_play_uri(app, entry) else {
+        return false;
+    };
+    // The control pauses only while this context is actually playing; a
+    // paused one keeps the play glyph, but pressing it resumes in place
+    // instead of restarting the context.
+    let playing = current_context && app.believed_playing();
+    let play = ui.interact(
+        cover_rect,
+        ui.id().with(("library-cover-play", index)),
+        Sense::click(),
+    );
+    let play_hover = play.hovered();
+    if play_hover || parent.hovered() {
+        let radius = if entry.round {
+            (cover_rect.width() / 2.0).min(127.0) as u8
+        } else {
+            6
+        };
+        ui.painter().rect_filled(
+            cover_rect,
+            CornerRadius::same(radius),
+            egui::Color32::from_black_alpha(120),
+        );
+        let icon = if playing {
+            Icon::PauseFilled
+        } else {
+            Icon::PlayFilled
+        };
+        let icon_size = (cover_rect.width() * 0.24).clamp(18.0, 26.0);
+        icon.image(
+            if play_hover {
+                app.palette.accent
+            } else {
+                egui::Color32::WHITE
+            },
+            icon_size,
+        )
+        .paint_at(
+            ui,
+            Rect::from_center_size(
+                cover_rect.center() + theme::play_glyph_offset(icon, icon_size),
+                Vec2::splat(icon_size),
+            ),
+        );
+    }
+    if !play.clicked() {
+        return false;
+    }
+    // The first click of a double click plays; the second must not play again.
+    if !play.double_clicked() {
+        if current_context {
+            app.actions.push(Action::TogglePlay);
+        } else {
+            app.actions.push(Action::PlayContext {
+                uri,
+                offset_uri: None,
+                offset_index: None,
+            });
+        }
+    }
+    true
+}
+
+fn grid_play_rect(cover_rect: Rect) -> Rect {
+    let size = (cover_rect.width() * 0.3).clamp(32.0, 44.0);
+    let inset = LIBRARY_ITEM_PADDING + size / 2.0;
+    Rect::from_center_size(
+        pos2(cover_rect.right() - inset, cover_rect.bottom() - inset),
+        Vec2::splat(size),
+    )
+}
+
+fn grid_pin_rect(cover_rect: Rect) -> Rect {
+    Rect::from_center_size(cover_rect.left_top() + Vec2::splat(12.0), Vec2::splat(20.0))
+}
+
+fn grid_play_button(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    entry: &Entry,
+    cover_rect: Rect,
+    parent: &egui::Response,
+    playing_here: bool,
+) -> bool {
+    let Some(uri) = entry_play_uri(app, entry) else {
+        return false;
+    };
+    let rect = grid_play_rect(cover_rect);
+    let size = rect.width();
+    let button = ui.interact(rect, ui.id().with("library-grid-play"), Sense::click());
+    let playing = playing_here && app.believed_playing();
+    let label = if playing {
+        // Translators: The play button on a Library card. {name} is the playlist, album, artist, or podcast.
+        gettext(app.locale, "Pause {name}")
+    } else {
+        // Translators: The play button on a Library card. {name} is the playlist, album, artist, or podcast.
+        gettext(app.locale, "Play {name}")
+    }
+    .replace("{name}", &entry.name);
+    button.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label.clone())
+    });
+    if parent.hovered() || playing_here || button.has_focus() {
+        let fill = if button.hovered() {
+            app.palette.accent_hover
+        } else {
+            app.palette.accent
+        };
+        ui.painter().add(
+            egui::epaint::Shadow {
+                offset: [0, 4],
+                blur: 12,
+                spread: 0,
+                color: egui::Color32::from_black_alpha(90),
+            }
+            .as_shape(rect, egui::CornerRadius::same(127)),
+        );
+        ui.painter().circle_filled(rect.center(), size / 2.0, fill);
+        let icon = if playing {
+            Icon::PauseFilled
+        } else {
+            Icon::PlayFilled
+        };
+        let icon_size = size * 0.42;
+        icon.image(app.palette.on_accent, icon_size).paint_at(
+            ui,
+            Rect::from_center_size(
+                rect.center() + theme::play_glyph_offset(icon, icon_size),
+                Vec2::splat(icon_size),
+            ),
+        );
+    }
+    if !button.clicked() {
+        return false;
+    }
+    if playing_here {
+        app.actions.push(Action::TogglePlay);
+    } else {
+        app.actions.push(Action::PlayContext {
+            uri,
+            offset_uri: None,
+            offset_index: None,
+        });
+    }
+    true
+}
+
+fn finish_entry_interaction(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    entry: &Entry,
+    cover_took_click: bool,
+    custom_order: bool,
+    drop_allowed: bool,
+) {
+    if !entry.ordering_key().is_empty() && response.drag_started_by(egui::PointerButton::Primary) {
+        egui::DragAndDrop::set_payload(
+            ui.ctx(),
+            DragEntry {
+                uri: entry.ordering_key().to_string(),
+                title: entry.name.clone(),
+                image: entry.image.clone(),
+            },
+        );
+    }
+    if drop_allowed
+        && (entry.liked || entry.editable)
+        && egui::DragAndDrop::has_payload_of_type::<DragTrack>(ui.ctx())
+        && let Some(track) = response.dnd_release_payload::<DragTrack>()
+    {
+        if entry.liked {
+            app.actions.push(Action::SetSavedMany {
+                uris: track
+                    .items
+                    .iter()
+                    .map(|item| item.uri().to_string())
+                    .collect(),
+                saved: true,
+            });
+        } else if let Page::Playlist(id) = &entry.page {
+            app.actions.push(Action::AddToPlaylist {
+                playlist_id: id.clone(),
+                playlist_name: entry.name.clone(),
+                items: track.items.clone(),
+            });
+        }
+    }
+    theme::focus_ring(ui, response);
+    if response.clicked() && !cover_took_click {
+        if let Some((folder_id, _, _)) = &entry.folder {
+            app.actions
+                .push(Action::ToggleLibraryFolder(folder_id.clone()));
+        } else {
+            app.actions.push(Action::Open(entry.page.clone()));
+        }
+    }
+    if !app.settings.sidebar_grid
+        && response.double_clicked()
+        && entry.folder.is_none()
+        && !cover_took_click
+        && let Some(uri) = entry_play_uri(app, entry)
+    {
+        app.actions.push(Action::PlayContext {
+            uri,
+            offset_uri: None,
+            offset_index: None,
+        });
+    }
+    entry_menu(app, response, entry, custom_order);
+    crate::autoscroll::row(ui, response);
+}
+
+fn liked_entry(app: &App) -> Entry {
+    let subtitle = match app.library.liked.total {
+        Some(total) => app.locale.liked_song_count(total),
+        None => gettext(app.locale, "Playlist").into_owned(),
+    };
+    let grid_subtitle = app
+        .library
+        .liked
+        .total
+        .map_or_else(String::new, |total| app.locale.song_count(total));
+    Entry {
+        image: None,
+        grid_image: None,
+        name: gettext(app.locale, "Liked Songs").into_owned(),
+        subtitle,
+        grid_subtitle,
+        page: Page::LikedSongs,
+        uri: String::new(),
+        round: false,
+        liked: true,
+        owned: false,
+        editable: false,
+        playlist_index: None,
+        folder: None,
+        depth: 0,
+        added_at: None,
+    }
+}
+
+pub(crate) fn selected_sort(app: &App, shelf: Filter) -> LibrarySort {
+    if let Some(sort) = app.settings.library_sort.get(&shelf).copied()
+        && sort.supports(shelf)
+    {
+        return sort;
+    }
+    if shelf != Filter::Playlists {
+        LibrarySort::Library
+    } else if !app.settings.sidebar_order.is_empty() {
+        LibrarySort::Local
+    } else if app
+        .rootlist
+        .iter()
+        .any(|row| matches!(row, crate::player::RootlistEntry::FolderStart { .. }))
+    {
+        LibrarySort::Spotify
+    } else {
+        LibrarySort::RecentlyPlayed
+    }
+}
+
+/// Offer only the sort modes supported by this shelf and queue the selected change.
+fn sort_menu(app: &mut App, ui: &mut egui::Ui, shelf: Filter, selected: LibrarySort) {
+    let locale = app.locale;
+    let labels = [
+        (LibrarySort::Library, gettext(locale, "Library order")),
+        (
+            LibrarySort::RecentlyPlayed,
+            gettext(locale, "Recently played"),
+        ),
+        (LibrarySort::Name, gettext(locale, "Name")),
+        (
+            LibrarySort::RecentlyAdded,
+            gettext(locale, "Recently added"),
+        ),
+        (LibrarySort::Local, gettext(locale, "Local custom order")),
+        (
+            LibrarySort::Spotify,
+            gettext(locale, "Spotify custom order"),
+        ),
+    ];
+    let label = &labels
+        .iter()
+        .find(|(sort, _)| *sort == selected)
+        .expect("sort label")
+        .1;
+    let response = ui.add(
+        egui::Button::image_and_text(
+            Icon::ChevronDown.image(app.palette.text, 15.0),
+            egui::RichText::new(label.as_ref()).font(theme::medium(13.0)),
+        )
+        .wrap()
+        .fill(app.palette.surface)
+        .corner_radius(12)
+        .min_size(vec2(0.0, 28.0)),
+    );
+    egui::Popup::menu(&response)
+        .frame(super::widgets::menu_frame(&app.palette))
+        .show(|ui| {
+            let width = labels
+                .iter()
+                .map(|(_, label)| {
+                    ui.painter()
+                        .layout_no_wrap(label.to_string(), theme::regular(13.5), app.palette.text)
+                        .size()
+                        .x
+                })
+                .fold(140.0_f32, f32::max)
+                + 52.0;
+            ui.set_width(width.min(ui.ctx().content_rect().width() - 24.0));
+            for (sort, label) in &labels {
+                if !sort.supports(shelf)
+                    || (*sort == LibrarySort::Library && shelf == Filter::Playlists)
+                    || (*sort == LibrarySort::Local && app.settings.sidebar_order.is_empty())
+                {
+                    continue;
+                }
+                if super::widgets::menu_item(
+                    ui,
+                    &app.palette,
+                    (*sort == selected).then_some(Icon::Check),
+                    label,
+                ) {
+                    app.actions
+                        .push(Action::SetLibrarySort { shelf, sort: *sort });
+                }
+            }
+        });
+}
+
+fn saved_time(value: Option<&str>) -> Option<i64> {
+    value
+        .and_then(|text| text.parse::<jiff::Timestamp>().ok())
+        .map(|time| time.as_millisecond())
+}
+
+/// Build the ranks once per frame, keeping the first occurrence just as
+/// `position` did. Searching the whole order from a sort comparator makes
+/// scrolling a large library quadratic even when only visible rows are drawn.
+fn first_ranks<'a>(
+    keys: impl Iterator<Item = &'a str>,
+) -> std::collections::HashMap<&'a str, usize> {
+    let mut ranks = std::collections::HashMap::new();
+    for (rank, key) in keys.enumerate() {
+        ranks.entry(key).or_insert(rank);
+    }
+    ranks
+}
+
+/// Applies the selected library order, then places pins first in their saved
+/// order. New playlists precede a saved local arrangement, and pinned playlists
+/// are shown at the top level rather than inside their folders.
+fn order_entries(app: &App, shelf: Filter, sort: LibrarySort, entries: &mut [Entry]) {
+    match sort {
+        LibrarySort::Name => {
+            // Each row sorts under the folders that hold it: its key is the
+            // path of names down to it, so a folder's rows follow the folder
+            // in name order and the folders sort among their siblings.
+            let mut folders: Vec<(String, String)> = Vec::new();
+            let paths: Vec<Vec<(String, String)>> = entries
+                .iter()
+                .map(|entry| {
+                    folders.truncate(entry.depth as usize);
+                    let key = (
+                        entry.name.to_lowercase(),
+                        match &entry.folder {
+                            Some((id, _, _)) => id.clone(),
+                            None => entry.uri.clone(),
+                        },
+                    );
+                    let mut path = folders.clone();
+                    path.push(key.clone());
+                    if entry.folder.is_some() {
+                        folders.push(key);
+                    }
+                    path
+                })
+                .collect();
+            let mut order: Vec<usize> = (0..entries.len()).collect();
+            order.sort_by(|a, b| paths[*a].cmp(&paths[*b]));
+            permute(entries, &order);
+        }
+        LibrarySort::RecentlyPlayed => {
+            let ranks = first_ranks(app.recent_contexts.iter().map(String::as_str));
+            let liked_uri = app
+                .user_id()
+                .map(|id| format!("spotify:user:{id}:collection"));
+            entries.sort_by_cached_key(|entry| {
+                let key = if entry.liked {
+                    liked_uri.as_deref()
+                } else {
+                    Some(entry.uri.as_str())
+                };
+                key.and_then(|key| ranks.get(key))
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        LibrarySort::RecentlyAdded => entries
+            .sort_by_key(|entry| (entry.added_at.is_none(), std::cmp::Reverse(entry.added_at))),
+        LibrarySort::Local => {
+            let ranks = first_ranks(app.settings.sidebar_order.iter().map(String::as_str));
+            entries.sort_by_cached_key(|entry| match ranks.get(entry.ordering_key()) {
+                Some(&rank) => (1, rank),
+                None => (0, entry.playlist_index.unwrap_or(0)),
+            });
+        }
+        LibrarySort::Spotify if !entries.iter().any(|entry| entry.folder.is_some()) => {
+            let ranks = first_ranks(app.rootlist.iter().filter_map(|row| match row {
+                crate::player::RootlistEntry::Playlist(uri) => Some(uri.as_str()),
+                _ => None,
+            }));
+            entries.sort_by_cached_key(|entry| {
+                (
+                    entry.liked,
+                    ranks.get(entry.uri.as_str()).copied().unwrap_or(usize::MAX),
+                )
+            });
+        }
+        LibrarySort::Spotify => entries.sort_by_key(|entry| entry.liked),
+        LibrarySort::Library => {}
+    }
+    let pins = app.settings.library_pins();
+    let ranks = first_ranks(pins.iter().map(String::as_str));
+    entries.sort_by_cached_key(|entry| {
+        ranks
+            .get(entry.ordering_key())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    if shelf == Filter::Playlists {
+        for entry in entries {
+            if app.settings.pinned_contexts.contains(&entry.uri) {
+                entry.depth = 0;
+            }
+        }
+    }
+}
+
+/// Puts `entries[order[i]]` at position `i`.
+fn permute<T>(entries: &mut [T], order: &[usize]) {
+    let mut place: Vec<usize> = vec![0; order.len()];
+    for (to, &from) in order.iter().enumerate() {
+        place[from] = to;
+    }
+    for start in 0..entries.len() {
+        while place[start] != start {
+            let to = place[start];
+            entries.swap(start, to);
+            place.swap(start, to);
+        }
+    }
+}
+
+pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let expanded_art = has_expanded_art(app);
+    let floating_art = app.settings.sidebar_grid && expanded_art;
+    // The traffic lights float over the top-left of the sidebar now, so the
+    // first nav row has to start below them.
+    let top = 12
+        + theme::titlebar_inset(ui.ctx()) as i8
+        + super::linux_left_controls_inset(ui.ctx()) as i8;
+    let beside = if app.show_queue_panel {
+        theme::SIDE_PANEL_MIN_WIDTH
+    } else {
+        0.0
+    };
+    let fit = super::yielding_panel(
+        ui.ctx(),
+        "sidebar",
+        super::SIDEBAR_MIN_WIDTH..=600.0,
+        app.settings.sidebar_width,
+        ui.available_width() - super::topbar::least_width(ui.ctx()) - beside,
+    );
+    let panel = egui::Panel::left("sidebar")
+        .resizable(true)
+        .default_size(app.settings.sidebar_width)
+        .size_range(fit.range.clone())
+        .show_separator_line(false)
+        .frame(Frame::new().fill(palette.panel).inner_margin(Margin {
+            left: 12,
+            right: 8,
+            top,
+            bottom: if expanded_art { 0 } else { 8 },
+        }));
+    let response = panel.show(ui, |ui| {
+        let art_rect = expanded_art.then(|| expanded_art_rect(ui));
+        if let Some(rect) = art_rect.filter(|_| !floating_art) {
+            reserve_expanded_art(ui, rect);
+        }
+        contents(app, ui, art_rect.filter(|_| floating_art));
+        if let Some(rect) = art_rect {
+            if floating_art {
+                paint_grid_art_mask(app, ui, rect);
+            }
+            paint_expanded_art(app, ui, rect);
+        }
+    });
+    let width = response.response.rect.width();
+    if (width - app.settings.sidebar_width).abs() > 1.0
+        && super::panel_width_chosen(ui.ctx(), "sidebar", &fit)
+    {
+        app.settings.sidebar_width = width;
+        app.actions.push(Action::SettingsChanged);
+    }
+}
+
+fn expanded_art_rect(ui: &egui::Ui) -> Rect {
+    let side = expanded_art_side(ui);
+    Rect::from_min_size(
+        pos2(
+            ui.max_rect().left(),
+            ui.max_rect().bottom() - EXPANDED_ART_GAP - side,
+        ),
+        Vec2::splat(side),
+    )
+}
+
+fn reserve_expanded_art(ui: &mut egui::Ui, rect: Rect) {
+    egui::Panel::bottom("sidebar-art-space")
+        .exact_size(rect.height() + EXPANDED_ART_GAP)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(Frame::new())
+        .show(ui, |_| {});
+}
+
+/// In grid mode content continues behind the shared fixed artwork.
+fn paint_grid_art_mask(app: &App, ui: &egui::Ui, rect: Rect) {
+    let bottom_fade_rect = Rect::from_min_max(
+        pos2(ui.max_rect().left(), rect.bottom() - 64.0),
+        pos2(ui.max_rect().right(), rect.bottom()),
+    );
+    super::widgets::paint_vertical_gradient(
+        ui,
+        bottom_fade_rect,
+        egui::Color32::TRANSPARENT,
+        app.palette.panel,
+    );
+    ui.painter().rect_filled(
+        Rect::from_min_max(
+            pos2(ui.max_rect().left(), rect.bottom()),
+            ui.max_rect().right_bottom(),
+        ),
+        0.0,
+        app.palette.panel,
+    );
+}
+
+fn has_expanded_art(app: &App) -> bool {
+    app.settings.art_expanded
+        && app
+            .now_playing()
+            .is_some_and(|now| now.art_url.is_some() || now.art_small.is_some())
+}
+
+fn expanded_art_side(ui: &egui::Ui) -> f32 {
+    ui.max_rect()
+        .width()
+        .min(ui.max_rect().height() * 0.45)
+        .max(80.0)
+}
+
+fn paint_expanded_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
+    let Some(now) = app.now_playing() else {
+        return;
+    };
+    let Some(url) = now.art_url.clone().or_else(|| now.art_small.clone()) else {
+        return;
+    };
+    let album_id = now.album_id.clone();
+    let show_id = now.show_id.clone();
+    let palette = app.palette;
+    ui.painter().add(
+        egui::epaint::Shadow {
+            offset: [0, 0],
+            blur: 28,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(if palette.dark { 120 } else { 40 }),
+        }
+        .as_shape(rect, egui::CornerRadius::same(8)),
+    );
+    super::widgets::playing_cover(
+        ui,
+        &palette,
+        app.backend.art(),
+        "sidebar-art",
+        Some(&url),
+        rect,
+        8.0,
+    );
+    let art = ui.interact(rect, egui::Id::new("sidebar-art"), Sense::click());
+    let chevron_rect = Rect::from_center_size(
+        pos2(rect.right() - 16.0, rect.top() + 16.0),
+        Vec2::splat(20.0),
+    );
+    let over_chevron = ui.rect_contains_pointer(chevron_rect);
+    if art.hovered() || over_chevron {
+        let chevron = ui.interact(
+            chevron_rect,
+            egui::Id::new("sidebar-art-collapse"),
+            Sense::click(),
+        );
+        ui.painter().circle_filled(
+            chevron_rect.center(),
+            10.0,
+            palette.panel.gamma_multiply(0.9),
+        );
+        Icon::ChevronDown.image(palette.text, 14.0).paint_at(
+            ui,
+            Rect::from_center_size(chevron_rect.center(), Vec2::splat(14.0)),
+        );
+        if chevron.clicked() {
+            app.settings.art_expanded = false;
+            app.actions.push(Action::SettingsChanged);
+        }
+    }
+    if art.clicked() && !over_chevron {
+        if let Some(id) = album_id {
+            app.actions.push(Action::Open(Page::Album(id)));
+        } else if let Some(id) = show_id {
+            app.actions.push(Action::Open(Page::Show(id)));
+        }
+    }
+}
+
+/// Project the playlist shelf without changing its saved order or pins.
+/// The Spotify order keeps the folder tree; ownership filtering then hides
+/// playlists the account does not own and folders left empty, with counts
+/// reflecting the visible rows. Text search stays flat so matches in
+/// collapsed folders remain reachable. Liked Songs belongs to the account.
+fn playlist_rows(app: &App, sort: LibrarySort, needle: &str, entries: &mut Vec<Entry>) {
+    let liked = liked_entry(app);
+    if needle.is_empty() || liked.name.to_lowercase().contains(needle) {
+        entries.push(liked);
+    }
+    let user_id = app.user_id().filter(|id| !id.is_empty());
+    // Name keeps playlists inside their folders, as Spotify does, and sorts
+    // each folder on its own (#651).
+    let folders = match sort {
+        LibrarySort::Spotify => true,
+        LibrarySort::Name => app
+            .rootlist
+            .iter()
+            .any(|row| matches!(row, crate::player::RootlistEntry::FolderStart { .. })),
+        _ => false,
+    };
+    if folders && needle.is_empty() {
+        folder_rows(app, user_id.unwrap_or(""), entries);
+    } else if let Some(playlists) = app.library.playlists.get() {
+        for (index, playlist) in playlists.iter().enumerate() {
+            if app.settings.library_by_you && !user_id.is_some_and(|id| playlist.owned_by(id)) {
+                continue;
+            }
+            if !needle.is_empty() && !playlist.name.to_lowercase().contains(needle) {
+                continue;
+            }
+            entries.push(playlist_entry(
+                app.locale,
+                playlist,
+                index,
+                user_id.unwrap_or(""),
+                app.can_edit_playlist(playlist),
+                0,
+                EntryArt::of(app),
+            ));
+        }
+    }
+}
+
+/// Playlist rows in account order, including collapsible folders (#95).
+/// With the By You filter only owned playlists are shown; folders left
+/// empty are hidden and their counts reflect the visible rows.
+fn folder_rows(app: &App, user_id: &str, entries: &mut Vec<Entry>) {
+    use crate::player::RootlistEntry;
+    let Some(playlists) = app.library.playlists.get() else {
+        return;
+    };
+    let by_uri: std::collections::HashMap<&str, (usize, &crate::api::models::Playlist)> = playlists
+        .iter()
+        .enumerate()
+        .map(|(index, playlist)| (playlist.uri.as_str(), (index, playlist)))
+        .collect();
+    let by_you = app.settings.library_by_you;
+    let owner = app.user_id().filter(|id| !id.is_empty());
+    let visible = |playlist: &crate::api::models::Playlist| {
+        !by_you || owner.is_some_and(|id| playlist.owned_by(id))
+    };
+    let mut depth = 0u8;
+    // Rows inside a rolled-up folder stay off the list; the stack knows
+    // how deep the rolled-up one sits.
+    let mut hidden_from: Option<u8> = None;
+    // Folders emptied by the ownership filter are skipped with their whole
+    // subtree; the depth below remembers where the skipped folder started.
+    let mut skipped_from: Option<u8> = None;
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for row in &app.rootlist {
+        match row {
+            RootlistEntry::FolderStart { id, name } => {
+                if skipped_from.is_some() || hidden_from.is_some() {
+                    depth += 1;
+                    continue;
+                }
+                let count = if by_you {
+                    folder_visible_playlists(&app.rootlist, &by_uri, &visible, id)
+                } else {
+                    folder_playlists(&app.rootlist, id)
+                };
+                if by_you && count == 0 {
+                    skipped_from = Some(depth);
+                    depth += 1;
+                    continue;
+                }
+                let collapsed = app.collapsed_folders.contains(id);
+                entries.push(Entry {
+                    image: None,
+                    grid_image: None,
+                    name: if name.is_empty() {
+                        gettext(app.locale, "Folder").into_owned()
+                    } else {
+                        name.clone()
+                    },
+                    subtitle: app.locale.folder_playlist_count(count as u32),
+                    grid_subtitle: app.locale.playlist_count(count as u32),
+                    page: Page::Home,
+                    uri: String::new(),
+                    round: false,
+                    liked: false,
+                    owned: false,
+                    editable: false,
+                    playlist_index: None,
+                    folder: Some((id.clone(), collapsed, count)),
+                    depth,
+                    added_at: None,
+                });
+                if collapsed {
+                    hidden_from = Some(depth);
+                }
+                depth += 1;
+            }
+            RootlistEntry::FolderEnd => {
+                depth = depth.saturating_sub(1);
+                if skipped_from == Some(depth) {
+                    skipped_from = None;
+                }
+                if hidden_from == Some(depth) {
+                    hidden_from = None;
+                }
+            }
+            RootlistEntry::Playlist(uri) => {
+                if skipped_from.is_some() {
+                    continue;
+                }
+                let Some((index, playlist)) = by_uri.get(uri.as_str()) else {
+                    continue;
+                };
+                if !visible(playlist) {
+                    continue;
+                }
+                if !seen.insert(uri.as_str()) {
+                    continue;
+                }
+                if hidden_from.is_some() && !app.settings.pinned_contexts.contains(uri) {
+                    continue;
+                }
+                entries.push(playlist_entry(
+                    app.locale,
+                    playlist,
+                    *index,
+                    user_id,
+                    app.can_edit_playlist(playlist),
+                    depth,
+                    EntryArt::of(app),
+                ));
+            }
+        }
+    }
+    // Playlists the rootlist has not met yet, the newly followed, wait at
+    // the end rather than vanish.
+    for (index, playlist) in playlists.iter().enumerate() {
+        if !visible(playlist) {
+            continue;
+        }
+        if !seen.contains(playlist.uri.as_str()) {
+            entries.push(playlist_entry(
+                app.locale,
+                playlist,
+                index,
+                user_id,
+                app.can_edit_playlist(playlist),
+                0,
+                EntryArt::of(app),
+            ));
+        }
+    }
+}
+
+/// How many playlists a folder holds that pass the ownership filter,
+/// nested ones included. Counts occurrences like `folder_playlists`.
+fn folder_visible_playlists(
+    rootlist: &[crate::player::RootlistEntry],
+    by_uri: &std::collections::HashMap<&str, (usize, &crate::api::models::Playlist)>,
+    visible: &impl Fn(&crate::api::models::Playlist) -> bool,
+    id: &str,
+) -> usize {
+    use crate::player::RootlistEntry;
+    let mut counting = false;
+    let mut depth = 0usize;
+    let mut count = 0;
+    for row in rootlist {
+        match row {
+            RootlistEntry::FolderStart { id: this, .. } => {
+                if counting {
+                    depth += 1;
+                } else if this == id {
+                    counting = true;
+                    depth = 1;
+                }
+            }
+            RootlistEntry::FolderEnd if counting => {
+                depth -= 1;
+                if depth == 0 {
+                    return count;
+                }
+            }
+            RootlistEntry::Playlist(uri)
+                if counting
+                    && by_uri
+                        .get(uri.as_str())
+                        .is_some_and(|(_, playlist)| visible(playlist)) =>
+            {
+                count += 1;
+            }
+            _ => {}
+        }
+    }
+    count
+}
+
+/// How many playlists a folder holds, nested ones included.
+fn folder_playlists(rootlist: &[crate::player::RootlistEntry], id: &str) -> usize {
+    use crate::player::RootlistEntry;
+    let mut counting = false;
+    let mut depth = 0usize;
+    let mut count = 0;
+    for row in rootlist {
+        match row {
+            RootlistEntry::FolderStart { id: this, .. } => {
+                if counting {
+                    depth += 1;
+                } else if this == id {
+                    counting = true;
+                    depth = 1;
+                }
+            }
+            RootlistEntry::FolderEnd if counting => {
+                depth -= 1;
+                if depth == 0 {
+                    return count;
+                }
+            }
+            RootlistEntry::Playlist(_) if counting => count += 1,
+            _ => {}
+        }
+    }
+    count
+}
+
+/// The artwork widths a row and a grid card ask for on this display.
+#[derive(Clone, Copy)]
+struct EntryArt {
+    row: u32,
+    grid: u32,
+}
+
+impl EntryArt {
+    fn of(app: &App) -> Self {
+        Self {
+            row: app.art_px(ROW_ART),
+            grid: app.art_px(super::widgets::CARD_ART),
+        }
+    }
+}
+
+fn playlist_entry(
+    locale: Locale,
+    playlist: &crate::api::models::Playlist,
+    index: usize,
+    user_id: &str,
+    editable: bool,
+    depth: u8,
+    art: EntryArt,
+) -> Entry {
+    Entry {
+        image: pick_image(&playlist.images, art.row).map(str::to_string),
+        grid_image: pick_image(&playlist.images, art.grid).map(str::to_string),
+        name: playlist.name.clone(),
+        // Translators: {owner} is the name of the playlist's owner.
+        subtitle: gettext(locale, "Playlist • {owner}").replace("{owner}", playlist.owner_name()),
+        grid_subtitle: playlist.owner_name().to_string(),
+        page: Page::Playlist(playlist.id.clone()),
+        uri: playlist.uri.clone(),
+        round: false,
+        liked: false,
+        owned: playlist.owned_by(user_id),
+        editable,
+        playlist_index: Some(index),
+        folder: None,
+        depth,
+        added_at: None,
+    }
+}
+
+fn nav_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    icon: Icon,
+    label: &str,
+    active: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let color = if active || response.hovered() {
+            palette.text
+        } else {
+            palette.secondary
+        };
+        let icon_rect =
+            Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), Vec2::splat(22.0));
+        icon.image(color, 22.0).paint_at(ui, icon_rect);
+        ui.painter().text(
+            pos2(rect.left() + 46.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            label,
+            theme::bold(15.0),
+            color,
+        );
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, ui.is_enabled(), active, label)
+    });
+    theme::focus_ring(ui, &response);
+    response
+}
+
+/// Draw Library navigation, shelf controls, search, and the visible rows.
+/// Playlist ownership and text filters are applied before ordering and pin placement.
+fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
+    let palette = app.palette;
+    let page = app.page().clone();
+    let locale = app.locale;
+    ui.add_space(4.0);
+    if nav_row(
+        ui,
+        &palette,
+        Icon::House,
+        &gettext(locale, "Home"),
+        page == Page::Home,
+    )
+    .clicked()
+    {
+        app.actions.push(Action::Open(Page::Home));
+    }
+    if nav_row(
+        ui,
+        &palette,
+        Icon::Search,
+        &gettext(locale, "Search"),
+        page == Page::Search,
+    )
+    .clicked()
+    {
+        app.actions.push(Action::FocusSearch);
+    }
+    ui.add_space(10.0);
+    ui.painter().hline(
+        ui.max_rect().x_range().shrink(4.0),
+        ui.cursor().top(),
+        egui::Stroke::new(1.0, palette.outline),
+    );
+    ui.add_space(10.0);
+
+    let filter_id = egui::Id::new("sidebar-filter");
+    let mut filter = ui
+        .data(|data| data.get_temp::<Filter>(filter_id))
+        .unwrap_or_default();
+    let show_search_id = egui::Id::new("sidebar-show-search");
+    let mut show_search = ui
+        .data(|data| data.get_temp::<bool>(show_search_id))
+        .unwrap_or(false);
+
+    let mut focus_search = false;
+
+    ui.horizontal(|ui| {
+        ui.add_space(6.0);
+        theme::icon(ui, Icon::Library, 22.0, palette.secondary);
+        ui.add_space(2.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if theme::icon_button(
+                ui,
+                Icon::PanelLeft,
+                16.0,
+                palette.secondary,
+                palette.text,
+                super::keys::platform_shortcut(
+                    &gettext(locale, "Hide sidebar (Ctrl+B)"),
+                    &gettext(locale, "Hide sidebar (Cmd+B)"),
+                ),
+            )
+            .clicked()
+            {
+                app.actions.push(Action::ToggleSidebar);
+            }
+            let grid = app.settings.sidebar_grid;
+            let (icon, label) = if grid {
+                (Icon::LayoutList, gettext(locale, "Show as list"))
+            } else {
+                (Icon::LayoutGrid, gettext(locale, "Show as grid"))
+            };
+            if theme::icon_button(ui, icon, 16.0, palette.secondary, palette.text, &label).clicked()
+            {
+                app.actions.push(Action::SetLibraryGrid(!grid));
+            }
+            // One item never deserved a menu: the plus creates directly.
+            if theme::icon_button(
+                ui,
+                Icon::Plus,
+                16.0,
+                palette.secondary,
+                palette.text,
+                &gettext(locale, "Create a playlist"),
+            )
+            .clicked()
+            {
+                app.actions.push(Action::ShowDialog(Dialog::CreatePlaylist {
+                    name: String::new(),
+                    public: false,
+                    add_uris: Vec::new(),
+                }));
+            }
+            if theme::icon_button(
+                ui,
+                Icon::Search,
+                16.0,
+                palette.secondary,
+                palette.text,
+                &gettext(locale, "Search Your Library"),
+            )
+            .clicked()
+            {
+                show_search = !show_search;
+                if show_search {
+                    focus_search = true;
+                } else {
+                    app.library.filter.clear();
+                }
+            }
+            // The buttons come first; the heading takes the space left,
+            // a little smaller where a translation runs long, and gives way
+            // to them in the narrowest sidebar, where the icon still names
+            // the section.
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                let heading = gettext(locale, "Library");
+                let room = ui.available_width() - 6.0;
+                let fits = [15.0, 14.0, 13.0].into_iter().find(|&size| {
+                    ui.painter()
+                        .layout_no_wrap(heading.to_string(), theme::bold(size), palette.text)
+                        .size()
+                        .x
+                        <= room
+                });
+                if let Some(size) = fits {
+                    theme::text(ui, heading, theme::bold(size), palette.text);
+                }
+            });
+        });
+    });
+    ui.add_space(6.0);
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+        for (value, label) in [
+            (Filter::Playlists, gettext(locale, "Playlists")),
+            (Filter::Albums, gettext(locale, "Albums")),
+            (Filter::Artists, gettext(locale, "Artists")),
+            (Filter::Podcasts, gettext(locale, "Podcasts")),
+        ] {
+            if theme::soft_button(ui, &palette, None, &label, filter == value).clicked() {
+                filter = value;
+            }
+        }
+    });
+    let sort = selected_sort(app, filter);
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        sort_menu(app, ui, filter, sort);
+        if filter == Filter::Playlists {
+            // Translators: Library filter for playlists created by the signed-in user.
+            let label = gettext(locale, "By You");
+            let by_you = app.settings.library_by_you;
+            let response = theme::soft_button(ui, &palette, None, &label, by_you);
+            response.widget_info(|| {
+                egui::WidgetInfo::selected(
+                    egui::WidgetType::Button,
+                    ui.is_enabled(),
+                    by_you,
+                    &*label,
+                )
+            });
+            if response.clicked() {
+                app.actions.push(Action::SetLibraryByYou(!by_you));
+            }
+        }
+    });
+    ui.data_mut(|data| {
+        data.insert_temp(filter_id, filter);
+        data.insert_temp(show_search_id, show_search);
+    });
+    if show_search {
+        ui.add_space(4.0);
+        let response = super::widgets::search_field(
+            ui,
+            &palette,
+            app.locale,
+            egui::Id::new("sidebar-search"),
+            &mut app.library.filter,
+            &gettext(locale, "Search in Your Library"),
+            ui.available_width() - 4.0,
+        );
+        if focus_search {
+            response.request_focus();
+        }
+    }
+    ui.add_space(6.0);
+
+    // Make sure the selected shelf is loading.
+    match filter {
+        Filter::Playlists => {}
+        Filter::Albums => {
+            if !app.library.albums.loading
+                && app.library.albums.error.is_none()
+                && (!app.library.albums.loaded_once
+                    || (sort != LibrarySort::Library && app.library.albums.can_load_more()))
+            {
+                app.actions.push(Action::LoadMore(Page::Albums));
+            }
+        }
+        Filter::Artists => {
+            if !app.library.artists.loading
+                && app.library.artists.error.is_none()
+                && (!app.library.artists.loaded_once
+                    || (sort != LibrarySort::Library && app.library.artists.can_load_more()))
+            {
+                app.actions.push(Action::LoadMore(Page::Artists));
+            }
+        }
+        Filter::Podcasts => {
+            if !app.library.shows.loading
+                && app.library.shows.error.is_none()
+                && (!app.library.shows.loaded_once
+                    || (sort != LibrarySort::Library && app.library.shows.can_load_more()))
+            {
+                app.actions.push(Action::LoadMore(Page::Podcasts));
+            }
+        }
+    }
+
+    let needle = app.library.filter.trim().to_lowercase();
+    let mut entries: Vec<Entry> = Vec::new();
+    let art = EntryArt::of(app);
+    let mut loading = false;
+    let mut error: Option<String> = None;
+    let mut more_page: Option<Page> = None;
+    match filter {
+        Filter::Playlists => {
+            playlist_rows(app, sort, &needle, &mut entries);
+            match &app.library.playlists {
+                Loadable::Loaded(_) => {}
+                Loadable::Loading | Loadable::NotLoaded => loading = true,
+                Loadable::Failed(message) => error = Some(message.clone()),
+            }
+        }
+        Filter::Albums => {
+            for saved in &app.library.albums.items {
+                let album = &saved.album;
+                if !needle.is_empty()
+                    && !album.name.to_lowercase().contains(&needle)
+                    && !album
+                        .artists
+                        .iter()
+                        .any(|a| a.name.to_lowercase().contains(&needle))
+                {
+                    continue;
+                }
+                let artists = crate::api::models::join_names(
+                    album.artists.iter().map(|artist| artist.name.as_str()),
+                );
+                entries.push(Entry {
+                    image: pick_image(&album.images, art.row).map(str::to_string),
+                    grid_image: pick_image(&album.images, art.grid).map(str::to_string),
+                    name: album.name.clone(),
+                    subtitle: format!("{} • {artists}", app.album_kind_label(album)),
+                    grid_subtitle: artists,
+                    page: Page::Album(album.id.clone()),
+                    uri: album.uri.clone(),
+                    round: false,
+                    liked: false,
+                    owned: false,
+                    editable: false,
+                    playlist_index: None,
+                    folder: None,
+                    depth: 0,
+                    added_at: saved_time(saved.added_at.as_deref()),
+                });
+            }
+            loading = app.library.albums.loading && app.library.albums.items.is_empty();
+            error = app.library.albums.error.clone();
+            if app.library.albums.error.is_none() && app.library.albums.can_load_more() {
+                more_page = Some(Page::Albums);
+            }
+        }
+        Filter::Artists => {
+            for artist in &app.library.artists.items {
+                if !needle.is_empty() && !artist.name.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                entries.push(Entry {
+                    image: pick_image(&artist.images, art.row).map(str::to_string),
+                    grid_image: pick_image(&artist.images, art.grid).map(str::to_string),
+                    name: artist.name.clone(),
+                    subtitle: gettext(locale, "Artist").into_owned(),
+                    grid_subtitle: String::new(),
+                    page: Page::Artist(artist.id.clone()),
+                    uri: artist.uri.clone(),
+                    round: true,
+                    liked: false,
+                    owned: false,
+                    editable: false,
+                    playlist_index: None,
+                    folder: None,
+                    depth: 0,
+                    added_at: None,
+                });
+            }
+            loading = app.library.artists.loading && app.library.artists.items.is_empty();
+            error = app.library.artists.error.clone();
+            if app.library.artists.error.is_none() && app.library.artists.can_load_more() {
+                more_page = Some(Page::Artists);
+            }
+        }
+        Filter::Podcasts => {
+            for saved in &app.library.shows.items {
+                let show = &saved.show;
+                // Audiobooks arrive as shows, but librespot can't play them.
+                if app.audiobook_shows.contains(&show.uri) {
+                    continue;
+                }
+                if !needle.is_empty() && !show.name.to_lowercase().contains(&needle) {
+                    continue;
+                }
+                entries.push(Entry {
+                    image: pick_image(&show.images, art.row).map(str::to_string),
+                    grid_image: pick_image(&show.images, art.grid).map(str::to_string),
+                    name: show.name.clone(),
+                    // Translators: {publisher} is the podcast's publisher.
+                    subtitle: gettext(locale, "Podcast • {publisher}")
+                        .replace("{publisher}", &show.publisher),
+                    grid_subtitle: show.publisher.clone(),
+                    page: Page::Show(show.id.clone()),
+                    uri: show.uri.clone(),
+                    round: false,
+                    liked: false,
+                    owned: false,
+                    editable: false,
+                    playlist_index: None,
+                    folder: None,
+                    depth: 0,
+                    added_at: saved_time(saved.added_at.as_deref()),
+                });
+            }
+            loading = app.library.shows.loading && app.library.shows.items.is_empty();
+            error = app.library.shows.error.clone();
+            if app.library.shows.error.is_none() && app.library.shows.can_load_more() {
+                more_page = Some(Page::Podcasts);
+            }
+        }
+    }
+
+    order_entries(app, filter, sort, &mut entries);
+    let custom_order = filter == Filter::Playlists && sort == LibrarySort::Local;
+    let pins = app.settings.library_pins();
+    let pinned_rows = entries
+        .iter()
+        .take_while(|entry| pins.iter().any(|key| key == entry.ordering_key()))
+        .count();
+    let playing_context = app.playing_context_uri();
+    let context_playing = app.believed_playing();
+    let current_page = app.page().clone();
+
+    crate::autoscroll::show(
+        ui,
+        egui::ScrollArea::vertical()
+            .id_salt("sidebar-list")
+            .auto_shrink([false, false]),
+        egui::Vec2b::new(false, true),
+        |ui| {
+            if egui::DragAndDrop::has_payload_of_type::<DragTrack>(ui.ctx())
+                || egui::DragAndDrop::has_payload_of_type::<DragEntry>(ui.ctx())
+            {
+                super::widgets::scroll_during_drag(ui);
+            }
+            if loading {
+                super::widgets::loading_row(ui, &palette, app.locale);
+            }
+            if let Some(error) = &error {
+                super::widgets::error_row(ui, app, error, None);
+            }
+            if entries.is_empty() && !loading && error.is_none() {
+                ui.add_space(12.0);
+                theme::subtle(
+                    ui,
+                    &palette,
+                    &if needle.is_empty() {
+                        gettext(app.locale, "Nothing here yet.")
+                    } else {
+                        gettext(app.locale, "No matches.")
+                    },
+                );
+            }
+            if app.settings.sidebar_grid {
+                library_grid(
+                    app,
+                    ui,
+                    &entries,
+                    filter,
+                    custom_order,
+                    pinned_rows,
+                    grid_art,
+                );
+                if let Some(page) = more_page {
+                    super::widgets::load_more_when_near_end(ui, app, page, true);
+                }
+                ui.add_space(grid_art.map_or(0.0, |rect| ui.max_rect().bottom() - rect.top()));
+                return;
+            }
+
+            let compact = true;
+            let row_height = COMPACT_ROW_HEIGHT;
+            // Calculate drop positions from fixed row height because rows shift
+            // before drawing.
+            let list_top = ui.cursor().top();
+            let pointer = ui.ctx().pointer_latest_pos().filter(|pos| {
+                ui.clip_rect().contains(*pos) && ui.rect_contains_pointer(ui.clip_rect())
+            });
+            // Tracks may drop on Liked Songs or playlists that take songs
+            // from this account.
+            let dragging_song = egui::DragAndDrop::has_payload_of_type::<DragTrack>(ui.ctx());
+            let drop_target = dragging_song
+                .then_some(pointer)
+                .flatten()
+                .map(|pos| ((pos.y - list_top) / row_height).floor())
+                .filter(|row| *row >= 0.0 && *row < entries.len() as f32)
+                .map(|row| row as usize)
+                .filter(|row| entries[*row].liked || entries[*row].editable);
+            // Sidebar entries, including Liked Songs, drop between rows.
+            let reordering = egui::DragAndDrop::has_payload_of_type::<DragEntry>(ui.ctx());
+            let reorder_slot = reordering.then_some(pointer).flatten().map(|pos| {
+                (((pos.y - list_top) / row_height).round().max(0.0) as usize).min(entries.len())
+            });
+            super::widgets::virtual_rows(ui, entries.len(), row_height, |ui, index| {
+                let entry = &entries[index];
+                let droppable = entry.liked || entry.editable;
+                let drop_hover = drop_target == Some(index);
+                let active = entry.folder.is_none() && entry.page == current_page;
+                // Liked Songs has no URI of its own here; Spotify plays it
+                // as the account's collection context.
+                let current = entry_is_playing_context(entry, playing_context.as_deref());
+                let playing = context_playing && current;
+                let pinned = pins.iter().any(|key| key == entry.ordering_key());
+                let (_, rect) = ui.allocate_space(vec2(ui.available_width(), row_height));
+                let id = ui.id().with((
+                    "library-row",
+                    &entry.uri,
+                    entry.liked,
+                    entry.folder.as_ref().map(|(id, _, _)| id),
+                ));
+                let response = ui.interact(rect, id, Sense::click_and_drag());
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        active,
+                        if let Some((_, collapsed, _)) = &entry.folder {
+                            app.locale.folder_state_label(&entry.name, *collapsed)
+                        } else {
+                            entry.name.clone()
+                        },
+                    )
+                });
+                // Animate rows around the current track or entry drop target.
+                let shift = ui.ctx().animate_value_with_time(
+                    ui.id().with(("drop-shift", index)),
+                    if let Some(slot) = reorder_slot {
+                        if index < slot { -4.0 } else { 4.0 }
+                    } else {
+                        match drop_target {
+                            Some(target) if index < target => -4.0,
+                            Some(target) if index > target => 4.0,
+                            _ => 0.0,
+                        }
+                    },
+                    crate::motion::seconds(ui.ctx(), 0.12),
+                );
+                let rect = rect.translate(vec2(0.0, shift));
+                // Set when the cover play button takes a click, so a double
+                // click on it does not also play from the row.
+                let mut cover_took_click = false;
+                if ui.is_rect_visible(rect) {
+                    if active {
+                        ui.painter()
+                            .rect_filled(rect, CornerRadius::same(6), palette.surface);
+                    } else if response.hovered() {
+                        ui.painter().rect_filled(
+                            rect,
+                            CornerRadius::same(6),
+                            palette.surface_hover.gamma_multiply(0.6),
+                        );
+                    }
+                    if drop_hover {
+                        ui.painter().rect_filled(
+                            rect,
+                            CornerRadius::same(6),
+                            palette.accent.gamma_multiply(0.18),
+                        );
+                        ui.painter().rect_stroke(
+                            rect,
+                            CornerRadius::same(6),
+                            egui::Stroke::new(1.5, palette.accent),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let name_color = if playing {
+                        palette.accent
+                    } else {
+                        palette.text
+                    };
+                    let indent = f32::from(entry.depth) * 14.0;
+                    if let Some((_, collapsed, _)) = &entry.folder {
+                        let chevron = if *collapsed {
+                            Icon::ChevronRight
+                        } else {
+                            Icon::ChevronDown
+                        };
+                        let left = rect.left() + LIBRARY_ITEM_PADDING + indent;
+                        chevron.image(palette.secondary, 16.0).paint_at(
+                            ui,
+                            Rect::from_center_size(
+                                pos2(left + 8.0, rect.center().y),
+                                Vec2::splat(16.0),
+                            ),
+                        );
+                        Icon::Library.image(palette.secondary, 20.0).paint_at(
+                            ui,
+                            Rect::from_center_size(
+                                pos2(left + 30.0, rect.center().y),
+                                Vec2::splat(20.0),
+                            ),
+                        );
+                        let text_left = left + 46.0;
+                        let text_right = rect.right() - LIBRARY_ITEM_PADDING;
+                        let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+                            pos2(text_left, rect.top()),
+                            pos2(text_right, rect.bottom()),
+                        ));
+                        crate::bidi::paint_line(
+                            &painter,
+                            text_left,
+                            text_right,
+                            rect.center().y - if compact { 0.0 } else { 9.0 },
+                            &entry.name,
+                            theme::medium(if compact { 13.5 } else { 14.0 }),
+                            name_color,
+                        );
+                        if !compact {
+                            crate::bidi::paint_line(
+                                &painter,
+                                text_left,
+                                text_right,
+                                rect.center().y + 10.0,
+                                &entry.subtitle,
+                                theme::regular(12.5),
+                                palette.secondary,
+                            );
+                        }
+                    } else if compact {
+                        let text_left = rect.left() + LIBRARY_ITEM_PADDING + indent;
+                        let text_right = rect.right()
+                            - if playing || pinned {
+                                28.0
+                            } else {
+                                LIBRARY_ITEM_PADDING
+                            };
+                        let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+                            pos2(text_left, rect.top()),
+                            pos2(text_right, rect.bottom()),
+                        ));
+                        crate::bidi::paint_line(
+                            &painter,
+                            text_left,
+                            text_right,
+                            rect.center().y,
+                            &entry.name,
+                            theme::medium(13.5),
+                            name_color,
+                        );
+                    } else {
+                        let cover_rect = Rect::from_center_size(
+                            pos2(
+                                rect.left() + LIBRARY_ITEM_PADDING + indent + 22.0,
+                                rect.center().y,
+                            ),
+                            Vec2::splat(ROW_ART),
+                        );
+                        if entry.liked {
+                            liked_cover(ui, cover_rect, 6.0);
+                        } else {
+                            super::widgets::paint_cover(
+                                ui,
+                                &palette,
+                                entry.image.as_deref(),
+                                cover_rect,
+                                if entry.round { 22.0 } else { 6.0 },
+                                if entry.round { Icon::User } else { Icon::Music },
+                                Some(app.backend.art()),
+                            );
+                        }
+                        let text_left = cover_rect.right() + 12.0;
+                        let text_right = rect.right()
+                            - if playing || pinned {
+                                28.0
+                            } else {
+                                LIBRARY_ITEM_PADDING
+                            };
+                        let painter = ui.painter().with_clip_rect(Rect::from_min_max(
+                            pos2(text_left, rect.top()),
+                            pos2(text_right, rect.bottom()),
+                        ));
+                        crate::bidi::paint_line(
+                            &painter,
+                            text_left,
+                            text_right,
+                            rect.center().y - 9.0,
+                            &entry.name,
+                            theme::medium(14.0),
+                            name_color,
+                        );
+                        crate::bidi::paint_line(
+                            &painter,
+                            text_left,
+                            text_right,
+                            rect.center().y + 10.0,
+                            &entry.subtitle,
+                            theme::regular(12.5),
+                            palette.secondary,
+                        );
+                        // Hovering the art offers to play right from here.
+                        cover_took_click = cover_play_button(
+                            app, ui, entry, index, cover_rect, &response, current,
+                        );
+                    }
+                    if playing {
+                        let icon_rect = Rect::from_center_size(
+                            pos2(rect.right() - 16.0, rect.center().y),
+                            Vec2::splat(16.0),
+                        );
+                        Icon::Volume2
+                            .image(palette.accent, 16.0)
+                            .paint_at(ui, icon_rect);
+                    } else if pinned {
+                        let icon_rect = Rect::from_center_size(
+                            pos2(rect.right() - 16.0, rect.center().y),
+                            Vec2::splat(13.0),
+                        );
+                        Icon::Pin
+                            .image(palette.secondary, 13.0)
+                            .paint_at(ui, icon_rect);
+                    }
+                    // Rows that cannot take the song step back a little.
+                    if dragging_song && !droppable {
+                        ui.painter().rect_filled(
+                            rect,
+                            CornerRadius::same(6),
+                            palette.panel.gamma_multiply(0.5),
+                        );
+                    }
+                }
+                finish_entry_interaction(
+                    app,
+                    ui,
+                    &response,
+                    entry,
+                    cover_took_click,
+                    custom_order,
+                    true,
+                );
+            });
+            if let Some(slot) = reorder_slot {
+                // A line in the gap the rows opened, so the eye lands
+                // where the row will.
+                let y = list_top + slot as f32 * row_height;
+                ui.painter().hline(
+                    ui.max_rect().x_range().shrink(6.0),
+                    y,
+                    egui::Stroke::new(2.0, palette.accent),
+                );
+                if ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary))
+                    && let Some(drag) = egui::DragAndDrop::take_payload::<DragEntry>(ui.ctx())
+                {
+                    if filter == Filter::Playlists {
+                        drop_playlist_row(app, &entries, pinned_rows, slot, &drag.uri);
+                    } else {
+                        drop_row(app, &entries, pinned_rows, slot, &drag.uri);
+                    }
+                }
+            }
+            if let Some(page) = more_page {
+                super::widgets::load_more_when_near_end(ui, app, page, true);
+            }
+        },
+    );
+}
+
+const EXPANDED_ART_GAP: f32 = 10.0;
+const LIBRARY_ITEM_PADDING: f32 = 8.0;
+/// The cover of a list row.
+const ROW_ART: f32 = 44.0;
+const GRID_MIN_CARD_WIDTH: f32 = 108.0;
+const GRID_MAX_COLUMNS: usize = 4;
+const GRID_TEXT_HEIGHT: f32 = 44.0;
+
+#[derive(Clone, Copy)]
+struct GridLayout {
+    columns: usize,
+    card_width: f32,
+    card_height: f32,
+    row_height: f32,
+}
+
+fn grid_layout(width: f32) -> GridLayout {
+    let columns = ((width / GRID_MIN_CARD_WIDTH).floor() as usize).clamp(2, GRID_MAX_COLUMNS);
+    let card_width = (width / columns as f32).max(1.0);
+    let card_height = card_width + GRID_TEXT_HEIGHT;
+    GridLayout {
+        columns,
+        card_width,
+        card_height,
+        row_height: card_height,
+    }
+}
+
+fn paint_grid_text(
+    ui: &egui::Ui,
+    rect: Rect,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+) {
+    let galley = crate::bidi::layout(
+        ui.painter(),
+        text,
+        font,
+        color,
+        rect.width(),
+        1,
+        Some(crate::bidi::ELLIPSIS),
+    );
+    ui.painter()
+        .galley(crate::bidi::galley_pos(rect, &galley), galley, color);
+}
+
+fn grid_reorder_slot(
+    pointer: egui::Pos2,
+    origin: egui::Pos2,
+    layout: GridLayout,
+    count: usize,
+) -> usize {
+    let row = ((pointer.y - origin.y) / layout.row_height)
+        .floor()
+        .max(0.0) as usize;
+    let column = ((pointer.x - origin.x) / layout.card_width)
+        .floor()
+        .max(0.0)
+        .min((layout.columns - 1) as f32) as usize;
+    let after = pointer.x - origin.x - column as f32 * layout.card_width > layout.card_width / 2.0;
+    (row * layout.columns + column + usize::from(after)).min(count)
+}
+
+fn library_grid(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    entries: &[Entry],
+    filter: Filter,
+    custom_order: bool,
+    pinned_rows: usize,
+    grid_art: Option<Rect>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+    let palette = app.palette;
+    let pins = app.settings.library_pins();
+    let playing_context = app.playing_context_uri();
+    let context_playing = app.believed_playing();
+    let current_page = app.page().clone();
+    let layout = grid_layout(ui.available_width());
+    let origin = ui.cursor().min;
+    let pointer = ui.ctx().pointer_latest_pos().filter(|pos| {
+        ui.clip_rect().contains(*pos)
+            && ui.rect_contains_pointer(ui.clip_rect())
+            && !grid_art.is_some_and(|art| art.contains(*pos))
+    });
+    let dragging_song = egui::DragAndDrop::has_payload_of_type::<DragTrack>(ui.ctx());
+    let reordering = egui::DragAndDrop::has_payload_of_type::<DragEntry>(ui.ctx());
+    let reorder_slot = reordering
+        .then_some(pointer)
+        .flatten()
+        .map(|pointer| grid_reorder_slot(pointer, origin, layout, entries.len()));
+    let row_count = entries.len().div_ceil(layout.columns);
+    let grid_id = ui.unique_id().with("library-grid");
+
+    super::widgets::virtual_rows(ui, row_count, layout.row_height, |ui, row| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            let start = row * layout.columns;
+            let end = (start + layout.columns).min(entries.len());
+            for index in start..end {
+                let entry = &entries[index];
+                let entry_id = (
+                    entry.ordering_key(),
+                    entry.liked,
+                    entry.folder.as_ref().map(|(id, _, _)| id.as_str()),
+                );
+                ui.scope_builder(egui::UiBuilder::new().id(grid_id.with(entry_id)), |ui| {
+                    let active = entry.folder.is_none() && entry.page == current_page;
+                    let playing_here = entry_is_playing_context(entry, playing_context.as_deref());
+                    let playing = context_playing && playing_here;
+                    let pinned = pins.iter().any(|key| key == entry.ordering_key());
+                    let droppable = entry.liked || entry.editable;
+                    let (rect, response) = ui.allocate_exact_size(
+                        vec2(layout.card_width, layout.card_height),
+                        Sense::click_and_drag(),
+                    );
+                    response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Button,
+                            ui.is_enabled(),
+                            active,
+                            if let Some((_, collapsed, _)) = &entry.folder {
+                                app.locale.folder_state_label(&entry.name, *collapsed)
+                            } else {
+                                entry.name.clone()
+                            },
+                        )
+                    });
+                    let cover_rect = Rect::from_min_size(
+                        rect.min + Vec2::splat(LIBRARY_ITEM_PADDING),
+                        Vec2::splat(layout.card_width - LIBRARY_ITEM_PADDING * 2.0),
+                    );
+                    let mut cover_took_click = false;
+                    if ui.is_rect_visible(rect) {
+                        if active {
+                            ui.painter()
+                                .rect_filled(rect, CornerRadius::same(6), palette.surface);
+                        } else if response.hovered() {
+                            ui.painter().rect_filled(
+                                rect,
+                                CornerRadius::same(6),
+                                palette.surface_hover.gamma_multiply(0.6),
+                            );
+                        }
+                        if entry.liked {
+                            liked_cover(ui, cover_rect, 6.0);
+                        } else if entry.folder.is_some() {
+                            ui.painter().rect_filled(
+                                cover_rect,
+                                CornerRadius::same(6),
+                                palette.surface,
+                            );
+                            Icon::Library
+                                .image(palette.secondary, layout.card_width * 0.3)
+                                .paint_at(
+                                    ui,
+                                    Rect::from_center_size(
+                                        cover_rect.center(),
+                                        Vec2::splat(layout.card_width * 0.3),
+                                    ),
+                                );
+                        } else {
+                            super::widgets::paint_cover(
+                                ui,
+                                &palette,
+                                entry.grid_image.as_deref().or(entry.image.as_deref()),
+                                cover_rect,
+                                if entry.round {
+                                    layout.card_width / 2.0
+                                } else {
+                                    6.0
+                                },
+                                if entry.round { Icon::User } else { Icon::Music },
+                                Some(app.backend.art()),
+                            );
+                        }
+
+                        cover_took_click =
+                            grid_play_button(app, ui, entry, cover_rect, &response, playing_here);
+
+                        let text_left = rect.left() + LIBRARY_ITEM_PADDING;
+                        let text_width = (rect.width() - LIBRARY_ITEM_PADDING * 2.0).max(0.0);
+                        paint_grid_text(
+                            ui,
+                            Rect::from_min_size(
+                                pos2(text_left, cover_rect.bottom() + 4.0),
+                                vec2(text_width, 18.0),
+                            ),
+                            &entry.name,
+                            theme::medium(13.5),
+                            if playing {
+                                palette.accent
+                            } else {
+                                palette.text
+                            },
+                        );
+                        paint_grid_text(
+                            ui,
+                            Rect::from_min_size(
+                                pos2(text_left, cover_rect.bottom() + 23.0),
+                                vec2(text_width, 17.0),
+                            ),
+                            &entry.grid_subtitle,
+                            theme::regular(12.0),
+                            palette.secondary,
+                        );
+
+                        if pinned {
+                            let pin_rect = grid_pin_rect(cover_rect);
+                            ui.painter().circle_filled(
+                                pin_rect.center(),
+                                pin_rect.width() / 2.0,
+                                egui::Color32::from_black_alpha(170),
+                            );
+                            Icon::Pin.image(egui::Color32::WHITE, 12.0).paint_at(
+                                ui,
+                                Rect::from_center_size(pin_rect.center(), Vec2::splat(12.0)),
+                            );
+                        }
+                        if dragging_song && !droppable {
+                            ui.painter().rect_filled(
+                                rect,
+                                CornerRadius::same(6),
+                                palette.panel.gamma_multiply(0.5),
+                            );
+                        } else if dragging_song
+                            && droppable
+                            && pointer.is_some_and(|pos| rect.contains(pos))
+                        {
+                            ui.painter().rect_stroke(
+                                cover_rect,
+                                CornerRadius::same(6),
+                                egui::Stroke::new(2.0, palette.accent),
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if reorder_slot == Some(index) {
+                            ui.painter().vline(
+                                rect.left(),
+                                rect.y_range(),
+                                egui::Stroke::new(2.0, palette.accent),
+                            );
+                        }
+                        if index + 1 == entries.len() && reorder_slot == Some(entries.len()) {
+                            ui.painter().vline(
+                                rect.right(),
+                                rect.y_range(),
+                                egui::Stroke::new(2.0, palette.accent),
+                            );
+                        }
+                    }
+
+                    finish_entry_interaction(
+                        app,
+                        ui,
+                        &response,
+                        entry,
+                        cover_took_click,
+                        custom_order,
+                        pointer.is_some(),
+                    );
+                });
+            }
+        });
+    });
+
+    if let Some(slot) = reorder_slot
+        && ui.input(|input| input.pointer.button_released(egui::PointerButton::Primary))
+        && let Some(drag) = egui::DragAndDrop::take_payload::<DragEntry>(ui.ctx())
+    {
+        if filter == Filter::Playlists {
+            drop_playlist_row(app, entries, pinned_rows, slot, &drag.uri);
+        } else {
+            drop_row(app, entries, pinned_rows, slot, &drag.uri);
+        }
+    }
+}
+
+fn entry_menu(app: &mut App, response: &egui::Response, entry: &Entry, custom_order: bool) {
+    if !entry.uri.is_empty() {
+        let owned_playlist = entry
+            .owned
+            .then_some(entry.playlist_index)
+            .flatten()
+            .and_then(|index| {
+                app.library
+                    .playlists
+                    .get()
+                    .and_then(|list| list.get(index))
+                    .cloned()
+            });
+        egui::Popup::context_menu(response)
+            .frame(super::widgets::menu_frame(&app.palette))
+            .show(|ui| {
+                super::widgets::context_menu_items(
+                    ui,
+                    app,
+                    &entry.uri,
+                    &entry.name,
+                    owned_playlist.as_ref(),
+                );
+                pin_menu(app, ui, entry.ordering_key());
+                if custom_order
+                    && super::widgets::menu_item(
+                        ui,
+                        &app.palette,
+                        Some(Icon::Clock),
+                        &gettext(app.locale, "Sort by recently played"),
+                    )
+                {
+                    app.actions.push(Action::SetLibrarySort {
+                        shelf: Filter::Playlists,
+                        sort: LibrarySort::RecentlyPlayed,
+                    });
+                }
+            });
+    } else if entry.liked {
+        egui::Popup::context_menu(response)
+            .frame(super::widgets::menu_frame(&app.palette))
+            .show(|ui| {
+                // The same width as every other menu; without it the menu
+                // stretches as wide as the window.
+                ui.set_min_width(200.0);
+                ui.set_max_width(300.0);
+                if super::widgets::menu_item(
+                    ui,
+                    &app.palette,
+                    Some(Icon::Play),
+                    &gettext(app.locale, "Play"),
+                ) && let Some(user) = &app.user
+                {
+                    app.actions.push(Action::PlayContext {
+                        uri: format!("spotify:user:{}:collection", user.id),
+                        offset_uri: None,
+                        offset_index: None,
+                    });
+                }
+                pin_menu(app, ui, entry.ordering_key());
+            });
+    }
+}
+
+fn pin_menu(app: &mut App, ui: &mut egui::Ui, key: &str) {
+    let mut pins = app.settings.library_pins();
+    let pinned = pins.iter().any(|held| held == key);
+    let label = if pinned {
+        gettext(app.locale, "Unpin")
+    } else {
+        gettext(app.locale, "Pin to top")
+    };
+    if super::widgets::menu_item(
+        ui,
+        &app.palette,
+        Some(if pinned { Icon::PinOff } else { Icon::Pin }),
+        &label,
+    ) {
+        if pinned {
+            pins.retain(|held| held != key);
+        } else {
+            pins.push(key.to_string());
+        }
+        app.actions.push(Action::ArrangeLibrary {
+            pinned: pins,
+            playlist_order: None,
+        });
+    }
+}
+
+/// Drops within the pin block arrange pins. Below it, a drop unpins the
+/// moved row and saves the full playlist arrangement at the chosen gap.
+fn drop_playlist_row(app: &mut App, entries: &[Entry], pinned_rows: usize, slot: usize, key: &str) {
+    if key != LIKED_SONGS_KEY
+        && !app
+            .library
+            .playlists
+            .get()
+            .is_some_and(|playlists| playlists.iter().any(|playlist| playlist.uri == key))
+    {
+        return;
+    }
+    let was_pinned = app.settings.library_pins().iter().any(|held| held == key);
+    if slot < pinned_rows || (was_pinned && slot == pinned_rows) {
+        drop_row(app, entries, pinned_rows, slot, key);
+        return;
+    }
+    let mut pins = app.settings.library_pins();
+    pins.retain(|held| held != key);
+    let mut order = full_playlist_order(app);
+    let anchor = entries
+        .iter()
+        .skip(slot)
+        .find_map(|entry| {
+            if let Some((id, _, _)) = &entry.folder {
+                // A drop before a collapsed folder precedes its first child
+                // when switching to the flat local arrangement.
+                let start = app.rootlist.iter().position(|row| matches!(row, crate::player::RootlistEntry::FolderStart { id: found, .. } if found == id))?;
+                app.rootlist[start + 1..].iter().find_map(|row| match row {
+                    crate::player::RootlistEntry::Playlist(held) if held != key && order.contains(held) => Some(held.as_str()),
+                    _ => None,
+                })
+            } else {
+                let held = entry.ordering_key();
+                (!held.is_empty() && held != key).then_some(held)
+            }
+        })
+        .map(str::to_string);
+    order.retain(|held| held != key);
+    let at = anchor
+        .and_then(|anchor| order.iter().position(|held| *held == anchor))
+        .unwrap_or(order.len());
+    order.insert(at, key.to_string());
+    app.actions.push(Action::ArrangeLibrary {
+        pinned: pins,
+        playlist_order: Some(order),
+    });
+}
+
+/// Every unpinned loaded playlist in the selected shelf order, including
+/// rows hidden by a search or collapsed folder. A drag snapshots this
+/// whole arrangement before applying its new local position.
+fn full_playlist_order(app: &App) -> Vec<String> {
+    let Some(playlists) = app.library.playlists.get() else {
+        return Vec::new();
+    };
+    let mut entries: Vec<_> = playlists
+        .iter()
+        .enumerate()
+        .map(|(index, playlist)| {
+            playlist_entry(
+                app.locale,
+                playlist,
+                index,
+                app.user_id().unwrap_or(""),
+                false,
+                0,
+                EntryArt::of(app),
+            )
+        })
+        .collect();
+    entries.push(liked_entry(app));
+    order_entries(
+        app,
+        Filter::Playlists,
+        selected_sort(app, Filter::Playlists),
+        &mut entries,
+    );
+    let pins = app.settings.library_pins();
+    entries
+        .iter()
+        .map(|entry| entry.ordering_key().to_string())
+        .filter(|key| !pins.contains(key))
+        .collect()
+}
+
+/// Reorders the pin block without disturbing pins on another shelf.
+fn drop_row(app: &mut App, entries: &[Entry], pinned_rows: usize, slot: usize, key: &str) {
+    let mut pins = app.settings.library_pins();
+    pins.retain(|held| held != key);
+    if slot <= pinned_rows {
+        let anchor = entries[..pinned_rows]
+            .iter()
+            .skip(slot)
+            .map(Entry::ordering_key)
+            .find(|held| *held != key);
+        let at = anchor
+            .and_then(|anchor| pins.iter().position(|held| held == anchor))
+            .unwrap_or(pins.len());
+        pins.insert(at, key.to_string());
+    }
+    app.actions.push(Action::ArrangeLibrary {
+        pinned: pins,
+        playlist_order: None,
+    });
+}
+
+/// The purple-to-blue Liked Songs tile.
+pub fn liked_cover(ui: &egui::Ui, rect: Rect, radius: f32) {
+    let texture_id = egui::Id::new("liked-cover-gradient");
+    let texture = ui
+        .data(|data| data.get_temp::<egui::TextureHandle>(texture_id))
+        .unwrap_or_else(|| {
+            let size = 64;
+            let lerp = |a: u8, b: u8, t: f32| (a as f32 + (b as f32 - a as f32) * t) as u8;
+            let top_left = [0x45, 0x0a, 0xf5];
+            let top_right = [0x6a, 0x3a, 0xe8];
+            let bottom_left = [0x8e, 0x9f, 0xe5];
+            let bottom_right = [0xc4, 0xef, 0xd9];
+            let pixels = (0..size)
+                .flat_map(|y| {
+                    let y = y as f32 / (size - 1) as f32;
+                    (0..size).map(move |x| {
+                        let x = x as f32 / (size - 1) as f32;
+                        egui::Color32::from_rgb(
+                            lerp(
+                                lerp(top_left[0], top_right[0], x),
+                                lerp(bottom_left[0], bottom_right[0], x),
+                                y,
+                            ),
+                            lerp(
+                                lerp(top_left[1], top_right[1], x),
+                                lerp(bottom_left[1], bottom_right[1], x),
+                                y,
+                            ),
+                            lerp(
+                                lerp(top_left[2], top_right[2], x),
+                                lerp(bottom_left[2], bottom_right[2], x),
+                                y,
+                            ),
+                        )
+                    })
+                })
+                .collect();
+            let texture = ui.ctx().load_texture(
+                "liked-cover-gradient",
+                egui::ColorImage::new([size, size], pixels),
+                egui::TextureOptions::LINEAR,
+            );
+            ui.data_mut(|data| data.insert_temp(texture_id, texture.clone()));
+            texture
+        });
+    egui::Image::new(&texture)
+        .corner_radius(CornerRadius::same(radius.min(127.0) as u8))
+        .paint_at(ui, rect);
+    let size = rect.width() * 0.45;
+    let icon_rect = Rect::from_center_size(rect.center(), Vec2::splat(size));
+    Icon::HeartFilled
+        .image(egui::Color32::WHITE, size)
+        .paint_at(ui, icon_rect);
+}
