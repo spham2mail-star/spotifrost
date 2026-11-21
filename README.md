@@ -39,11 +39,12 @@ You need **Spotify Premium** to play music.
 - The mini player (Winamp/WMP mode) and its skins
 - Preset themes and the theme picker (it's glass only)
 - Friend activity and radio
-- Chromecast and Sonos discovery, and the Spotify Soloist player
+- Chromecast and Sonos discovery
 - The menu bar icon on macOS
 - Album-art colors, proxy settings, zoom, frame-rate and title-bar options
 - Settings for device name, autoplay, output buffer, audio cache and play
-  history (autoplay stays on, and a small 512 MB audio cache is kept)
+  history (autoplay stays on, and the built-in player keeps a small 512 MB
+  audio cache)
 - The update checker, demo mode and non-English languages
 
 Lists are always compact, and the app uses the macOS system font.
@@ -84,12 +85,34 @@ Spotify asks every app like this one to use its own free registration (a
 6. Paste it into Spotifrost's sign-in screen and click **Sign in with
    Spotify**. Approve access in your browser, then come back to the app.
 
-To play on this computer, click **Enable playback here** in Settings and
-approve the second browser prompt. Your computer then appears in Spotify
-Connect as **Spotifrost**.
+Then choose how this computer plays music. **Spotify Soloist** (below) is
+recommended. The other choice, **Use the built-in player**, asks you to approve
+a second browser prompt, and your computer then appears in Spotify Connect as
+**Spotifrost**.
 
 Spotifrost never sees your Spotify password. Sign-ins are kept in your
 system's keychain.
+
+## Spotify Soloist
+
+Soloist is Spotify's own player, which Spotifrost downloads from Spotify and
+runs for you. It's the most reliable way to play music, because Spotify
+sometimes refuses to unlock songs for the built-in player (see
+[below](#spotify-refused-the-audio-key)). It also supports lossless audio.
+
+1. After you sign in, choose **Set up Soloist** (or go to **Settings → Spotify
+   Soloist** later).
+2. Copy your personal key from
+   [Spotify's Soloist page](https://developer.spotify.com/dashboard/soloist).
+   It's different from your Client ID. Paste it and choose **Download Soloist**.
+3. Open the Spotify app on your phone or another computer, on the same Wi-Fi
+   and account, and play a song. From its list of devices, choose the
+   **Spotifrost Soloist (…)** name shown in setup. You only do this once.
+4. Choose **Start listening**.
+
+If Soloist doesn't show up in the device list, try the Spotify desktop app
+with a song playing, and make sure no VPN or guest Wi-Fi is hiding it. If you
+used Spotifast with Soloist before, Spotifrost reuses your key automatically.
 
 ## Troubleshooting
 
@@ -104,10 +127,10 @@ minutes.
 ### Spotify refused the audio key
 
 Spotify sends songs locked, and the player has to ask for each song's key.
-Sometimes Spotify says no. That comes from Spotify, not from your computer,
-and it affects every player built on
-[librespot](https://github.com/librespot-org/librespot). Try again later, or
-play through the Spotify app on another device using Spotify Connect.
+Sometimes Spotify says no to the built-in player. That comes from Spotify,
+not from your computer, and it affects every player built on
+[librespot](https://github.com/librespot-org/librespot). The fix is to use
+[Spotify Soloist](#spotify-soloist), which Spotify unlocks songs for.
 
 ### Invalid redirect URI
 

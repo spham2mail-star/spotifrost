@@ -18,6 +18,7 @@ pub mod search;
 pub mod settings;
 pub mod show;
 pub mod sidebar;
+mod soloist;
 pub mod topbar;
 pub mod widgets;
 
@@ -38,6 +39,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if !signed_in {
         player_bar::end_tint_session(ctx);
         login::show(app, ui, connecting);
+        toasts(app, ctx, 20.0);
+        caption_buttons(ui, &app.palette, app.locale);
+        fastframe_titlebar::resize(ui);
+        return;
+    }
+    let soloist_view = app.soloist_view();
+    if soloist_view != crate::app::SoloistView::App {
+        player_bar::end_tint_session(ctx);
+        if soloist_view == crate::app::SoloistView::Loading {
+            login::show(app, ui, true);
+        } else {
+            soloist::onboarding(app, ui);
+        }
         toasts(app, ctx, 20.0);
         caption_buttons(ui, &app.palette, app.locale);
         fastframe_titlebar::resize(ui);
@@ -235,7 +249,9 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             // One banner at a time: a song that will not play matters more
             // than a slow app, which waits its turn.
             if app.dialog.is_none() && page != Page::Settings {
-                if app.audio_key_banner {
+                if app.soloist_waiting() {
+                    soloist::banner(app, ui);
+                } else if app.audio_key_banner {
                     audio_key_banner(app, ui);
                 } else if app.slow_banner {
                     slow_banner(app, ui);

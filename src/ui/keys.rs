@@ -16,6 +16,20 @@ pub(super) const SIDEBAR_SHORTCUT: &str = platform_shortcut("Ctrl+B", "Cmd+B");
 pub(super) const QUIT_SHORTCUT: &str = platform_shortcut("Ctrl+Q", "Cmd+Q");
 
 pub fn handle(app: &mut App, ctx: &egui::Context) {
+    if app.soloist_view() != crate::app::SoloistView::App {
+        // Setup owns navigation, but the window must still close and quit.
+        // Consume shifted variants first so Cmd+Shift+Q never becomes Quit.
+        ctx.input_mut(|input| {
+            for (key, action) in [(Key::Q, Action::Quit), (Key::W, Action::CloseWindow)] {
+                if !input.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, key)
+                    && input.consume_key(Modifiers::COMMAND, key)
+                {
+                    app.actions.push(action);
+                }
+            }
+        });
+        return;
+    }
     // A focused song row still takes Ctrl+arrow and plain shortcuts to
     // control playback; a text field uses those keys for typing and moving
     // its caret.

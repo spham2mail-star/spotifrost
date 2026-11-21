@@ -703,6 +703,15 @@ pub fn autostart() -> fastframe_autostart::Autostart {
 }
 
 pub enum Command {
+    Soloist {
+        enabled: bool,
+        key: Option<String>,
+    },
+    SoloistDevice(Option<crate::api::models::Device>),
+    SoloistUpdate {
+        generation: u64,
+        update: crate::soloist::Update,
+    },
     OpenThemesFolder,
     /// Read or change the login registration, off the UI thread: it reads
     /// and writes a file, the registry or D-Bus, and the Flatpak portal may
@@ -926,6 +935,7 @@ pub enum Command {
 }
 
 pub enum Event {
+    Soloist(crate::soloist::Update),
     /// The folder picked in the local files dialog; `None` when cancelled.
     LocalFilesFolderChosen(Option<std::path::PathBuf>),
     /// The songs in `folder`, by the `spotify:local:` URIs they play for.
@@ -1090,6 +1100,7 @@ pub use fastframe_shell::Waker;
 
 /// The interface's handle to the runtime.
 pub struct Backend {
+    pub soloist_output_volume: crate::soloist::OutputVolume,
     commands: mpsc::UnboundedSender<Command>,
     events: std::sync::mpsc::Receiver<Event>,
     art: ArtLoader,
@@ -1160,6 +1171,8 @@ impl Backend {
         let art = ArtLoader::new(http.clone(), runtime.handle().clone(), dirs.art_cache_dir());
         let activity = Arc::new(NetActivity::default());
 
+        let soloist_output_volume = crate::soloist::OutputVolume::default();
+        let worker_output_volume = soloist_output_volume.clone();
         let worker_activity = Arc::clone(&activity);
         let worker_art = art.clone();
         let worker_commands = command_tx.clone();
@@ -1178,6 +1191,7 @@ impl Backend {
                         worker_commands,
                         waker,
                     );
+                    worker.soloist_output_volume = worker_output_volume;
                     if restore_sign_in {
                         worker.restore_session();
                     }
@@ -1189,6 +1203,7 @@ impl Backend {
             .expect("unable to start the backend thread");
 
         Self {
+            soloist_output_volume,
             commands: command_tx,
             events: event_rx,
             art,
@@ -1735,6 +1750,9 @@ impl PlaylistHeaderLookup {
 }
 
 struct Worker {
+    soloist_output_volume: crate::soloist::OutputVolume,
+    soloist: Option<crate::soloist::Handle>,
+    soloist_generation: u64,
     dirs: AppDirs,
     credentials: CredentialStore,
     web_tokens: [Option<Arc<WebTokens>>; 2],
@@ -1853,6 +1871,9 @@ impl Worker {
         waker: Waker,
     ) -> Self {
         Self {
+            soloist_output_volume: crate::soloist::OutputVolume::default(),
+            soloist: None,
+            soloist_generation: 0,
             #[cfg(not(test))]
             credentials: CredentialStore::new(dirs.clone()),
             #[cfg(test)]
@@ -2073,6 +2094,62 @@ impl Worker {
                 continue;
             }
             match command {
+                Command::Soloist { enabled, key } => {
+                    if enabled
+                        && key.is_none()
+                        && self.soloist.as_ref().is_some_and(|soloist| {
+                            soloist.is_running()
+                                && self
+                                    .api
+                                    .account()
+                                    .as_ref()
+                                    .is_some_and(|account| account.as_str() == soloist.account)
+                        })
+                    {
+                        continue;
+                    }
+                    self.stop_soloist().await;
+                    if !enabled {
+                        self.emit(Event::Soloist(crate::soloist::Update::Status(
+                            crate::soloist::Status::Off,
+                        )));
+                    }
+                    // A rate-limited sign-in can still be unverified here.
+                    // Saying so beats a button that seems to do nothing (#1137).
+                    if enabled && self.api.account().is_none() {
+                        self.emit(Event::Soloist(crate::soloist::Update::Status(
+                            crate::soloist::Status::Failed(crate::soloist::Failure::NotSignedIn),
+                        )));
+                    }
+                    if enabled && let Some(account) = self.api.account() {
+                        let commands = self.commands.clone();
+                        let generation = self.soloist_generation;
+                        let notify = Arc::new(move |update| {
+                            let _ = commands.send(Command::SoloistUpdate { generation, update });
+                        });
+                        self.soloist =
+                            Some(crate::soloist::Handle::start(crate::soloist::Config {
+                                dirs: self.dirs.clone(),
+                                account: account.as_str().to_owned(),
+                                key,
+                                lease: self.credentials.lease(CredentialSlot::Soloist),
+                                http: self.http.clone(),
+                                notify,
+                                audio_config: self.engine_config.clone(),
+                                output_volume: self.soloist_output_volume.clone(),
+                            }));
+                    }
+                }
+                Command::SoloistDevice(device) => {
+                    if let Some(soloist) = &self.soloist {
+                        soloist.client.bind(device);
+                    }
+                }
+                Command::SoloistUpdate { generation, update } => {
+                    if generation == self.soloist_generation {
+                        self.emit(Event::Soloist(update));
+                    }
+                }
                 Command::ListOutputDevices => {
                     let events = self.events.clone();
                     let waker = self.waker.clone();
@@ -2227,7 +2304,11 @@ impl Worker {
                     self.pending_authorization = None;
                 }
                 Command::SignOut => {
+                    self.stop_soloist().await;
                     self.sign_out();
+                    if crate::soloist::forget(&self.dirs).await.is_err() {
+                        self.emit(Event::Error("Could not remove Soloist pairing data. Check the application state directory's permissions.".into()));
+                    }
                     // The account caches go in command order, so nothing a
                     // sign-in after this stores goes with them. This loop
                     // writes the snapshots, so they go now. The playlist
@@ -2718,8 +2799,16 @@ impl Worker {
             engine.shutdown();
         }
         self.stop_kept_player();
+        self.stop_soloist().await;
         drop(cache_writes);
         let _ = cache_writer.await;
+    }
+
+    async fn stop_soloist(&mut self) {
+        self.soloist_generation += 1;
+        if let Some(soloist) = self.soloist.take() {
+            soloist.stop().await;
+        }
     }
 
     // ---- Web API sign-in --------------------------------------------------
@@ -2765,7 +2854,7 @@ impl Worker {
         lease: CredentialLease,
         result: Result<crate::credentials::Loaded, crate::credentials::Error>,
     ) {
-        if slot == CredentialSlot::Proxy {
+        if matches!(slot, CredentialSlot::Proxy | CredentialSlot::Soloist) {
             return;
         }
         if !lease.current() {
@@ -2818,7 +2907,7 @@ impl Worker {
                     }
                 }
             }
-            None | Some(StoredGrant::Proxy(_)) => {}
+            None | Some(StoredGrant::Proxy(_) | StoredGrant::Soloist(_)) => {}
         }
         if slot == CredentialSlot::Playback {
             self.start_prerelease();
@@ -3268,7 +3357,10 @@ impl Worker {
         self.authorizing_source = None;
         self.pending_authorization = None;
         self.api.clear_all();
-        for slot in CredentialSlot::SPOTIFY {
+        for slot in CredentialSlot::SPOTIFY
+            .into_iter()
+            .chain([CredentialSlot::Soloist])
+        {
             self.delete_stored_grant(slot);
         }
         self.emit(Event::Playback(LocalPlayback::Unavailable));
@@ -4468,6 +4560,16 @@ impl Worker {
 
     /// Cancel requests on sign-out and report completion under their original generation.
     fn dispatch(&self, request: ApiRequest) -> tokio::task::AbortHandle {
+        let soloist = self
+            .soloist
+            .as_ref()
+            .filter(|handle| {
+                self.api
+                    .account()
+                    .as_ref()
+                    .is_some_and(|account| account.as_str() == handle.account)
+            })
+            .map(|handle| handle.client.clone());
         let api = Arc::clone(&self.api);
         let made_for_you = Arc::clone(&self.made_for_you);
         let new_releases = Arc::clone(&self.new_releases);
@@ -4487,7 +4589,12 @@ impl Worker {
         tokio::spawn(async move {
             let (response, expired) = tokio::select! {
                 _ = session.changed() => return,
-                result = handle(&api, &made_for_you, &new_releases, &connect, engine.as_deref(), &background_session, request) => result,
+                result = async {
+                    if let Some(soloist) = soloist && let Some(response) = soloist.dispatch(&request).await {
+                        return (response, Vec::new());
+                    }
+                    handle(&api, &made_for_you, &new_releases, &connect, engine.as_deref(), &background_session, request).await
+                } => result,
             };
             // Apply completion on the command loop. A late response cannot
             // clear or repopulate a session created after sign-out.

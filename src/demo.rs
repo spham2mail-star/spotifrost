@@ -292,6 +292,7 @@ fn page<T>(items: Vec<T>) -> ApiPage<T> {
 
 /// Populates the offline app with cards for screenshots and UI tests.
 pub fn populate(app: &mut App) {
+    app.soloist_onboarding = crate::settings::SoloistOnboarding::Complete;
     app.backend.set_offline(true);
     app.offline = true;
     // A demo never reads the real login registration; it shows it off.
@@ -4678,6 +4679,117 @@ mod tests {
             "the dialog runs {} pixels past the bottom of a {height}-tall window",
             bottom - height
         );
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn soloist_keeps_spotify_feature_authorization_available() {
+        use crate::backend::LocalPlayback;
+        let (ctx, mut app) = accessible_app("soloist-spotify-access");
+        app.settings.soloist_enabled = true;
+        app.selected_device = Some("own-soloist".into());
+        app.local_ready = false;
+        app.local_playback = LocalPlayback::Unavailable;
+        for query in ["Spotify access", "lyrics", "activity", "Made for you"] {
+            let text = settings_text(&ctx, &mut app, query);
+            assert!(text.iter().any(|s| s == "Spotify access"), "{text:?}");
+            assert!(text.iter().any(|s| s == "Authorize"), "{text:?}");
+        }
+        for (state, label, can_authorize) in [
+            (LocalPlayback::Unavailable, "Authorize", true),
+            (LocalPlayback::Failed("expired".into()), "Try again", true),
+            (
+                LocalPlayback::Authorizing,
+                "Finish authorizing in your browser.",
+                false,
+            ),
+            (LocalPlayback::Connecting, "Connecting to Spotify…", false),
+            (
+                LocalPlayback::WaitingForNetwork,
+                "Waiting for network…",
+                false,
+            ),
+            (
+                LocalPlayback::Ready {
+                    device_id: "built-in".into(),
+                },
+                "Connected",
+                false,
+            ),
+        ] {
+            app.local_playback = state;
+            settings_text(&ctx, &mut app, "Spotify access");
+            let text = view_frame(&ctx, &mut app, vec![], crate::ui::settings::show);
+            let pos = text
+                .iter()
+                .find(|(s, _)| s == label)
+                .expect(label)
+                .1
+                .center();
+            app.actions.clear();
+            view_frame(
+                &ctx,
+                &mut app,
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: true,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                crate::ui::settings::show,
+            );
+            assert_eq!(
+                app.actions
+                    .iter()
+                    .any(|a| matches!(a, Action::EnablePlayback)),
+                can_authorize
+            );
+            assert!(
+                !app.actions
+                    .iter()
+                    .any(|a| matches!(a, Action::UseBuiltInPlayer | Action::SetSoloist(false)))
+            );
+            assert!(app.settings.soloist_enabled);
+            assert_eq!(app.selected_device.as_deref(), Some("own-soloist"));
+        }
+        app.settings.soloist_enabled = false;
+        let text = settings_text(&ctx, &mut app, "lyrics");
+        assert!(!text.iter().any(|s| s == "Spotify access"));
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn soloist_can_be_enabled_again_without_pasting_the_saved_key() {
+        if !crate::soloist::install::supported() {
+            return;
+        }
+        use egui::accesskit::{Action as AccessibleAction, Role};
+        let (ctx, mut app) = accessible_app("soloist-saved-key");
+        app.backend.set_offline(true);
+        app.open(Page::Settings);
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let button = accessible_node(&tree, "Set up Soloist", Role::Button);
+        accessible_frame(
+            &ctx,
+            &mut app,
+            vec![accessible_action(button, AccessibleAction::Click, None)],
+        );
+        assert!(app.settings.soloist_enabled);
+        assert!(app.soloist_key.is_empty());
+        assert!(matches!(
+            app.soloist_status,
+            crate::soloist::Status::Starting
+        ));
+        assert_eq!(app.soloist_view(), crate::app::SoloistView::Setup);
         app.backend.shutdown();
     }
 

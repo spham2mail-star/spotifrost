@@ -51,6 +51,7 @@ pub mod session_reads;
 pub mod settings;
 pub mod single_instance;
 pub mod sink;
+pub mod soloist;
 pub mod sonos;
 mod storage;
 pub mod terminate;

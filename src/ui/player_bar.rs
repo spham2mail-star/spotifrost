@@ -633,7 +633,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>) {
     // Some remote devices, such as a phone playing over Bluetooth, refuse
     // volume changes from other apps: show their volume but don't offer to
     // change it.
-    let adjustable = now.is_none_or(|now| now.can_set_volume);
+    let adjustable = !app.soloist_waiting() && now.is_none_or(|now| now.can_set_volume);
     let controls = ui.add_enabled_ui(adjustable, |ui| {
         match thin_slider(
             ui,
@@ -691,7 +691,7 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>) {
         ));
     }
     ui.add_space(4.0);
-    let remote = now.is_some_and(|now| !now.local);
+    let remote = now.is_some_and(|now| !now.local) && !app.targets_own_soloist();
     // Playing elsewhere, the button shows that device's own icon.
     let icon = now
         .filter(|_| remote)

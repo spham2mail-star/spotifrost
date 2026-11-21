@@ -230,8 +230,6 @@ winresource = "0.1"
 default = []
 # Keep the existing maintainer preview command working.
 soloist-preview = []
-# Does nothing now; kept so older build scripts that pass it still build.
-soloist-native-audio = []
 
 [profile.release]
 lto = "thin"

@@ -45,6 +45,7 @@ fn show_steps(app: &App, ctx: &egui::Context) -> bool {
 const STEPS_OPEN: &str = "login-steps-open";
 
 pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
+    let soloist = app.is_connected() && app.soloist_waiting();
     let palette = app.palette;
     let ctx = ui.ctx().clone();
     egui::CentralPanel::default()
@@ -78,10 +79,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
             let inner = if steps { column * 2.0 + GUTTER } else { COLUMN };
             let card_width = inner + 72.0;
             let proxy_id = egui::Id::new("login-proxy-open");
-            let proxy_open = ui
-                .ctx()
-                .data(|data| data.get_temp::<bool>(proxy_id))
-                .unwrap_or(false);
+            let proxy_open = !soloist
+                && ui
+                    .ctx()
+                    .data(|data| data.get_temp::<bool>(proxy_id))
+                    .unwrap_or(false);
             let card_height: f32 = if !proxy_open {
                 400.0
             } else if app.settings.proxy_mode.is_manual() {
@@ -265,7 +267,11 @@ fn sign_in_column(app: &mut App, ui: &mut egui::Ui, connecting: bool, beside: Op
         }
         _ if connecting => {
             ui.horizontal(|ui| {
-                let message = gettext(locale, "Connecting to Spotify…");
+                let message = if app.soloist_waiting() && app.is_connected() {
+                    app.soloist_wait_message()
+                } else {
+                    gettext(locale, "Connecting to Spotify…")
+                };
                 let gap = ui.spacing().item_spacing.x;
                 let galley = crate::bidi::layout(
                     ui.painter(),
@@ -331,6 +337,10 @@ fn sign_in_column(app: &mut App, ui: &mut egui::Ui, connecting: bool, beside: Op
                 }
             }
         }
+    }
+    // Waiting for Soloist is brief, and the app opens by itself if it isn't.
+    if app.is_connected() && app.soloist_waiting() {
+        return;
     }
     let proxy_id = egui::Id::new("login-proxy-open");
     let mut proxy_open = ui
@@ -614,6 +624,11 @@ fn proxy_fields(ui: &mut egui::Ui, app: &mut App) {
 
 pub(super) fn big_button(ui: &mut egui::Ui, app: &App, label: &str) -> bool {
     big_button_painted(ui, app, label, false)
+}
+
+/// `big_button` whose label stays readable while it is disabled.
+pub(super) fn step_button(ui: &mut egui::Ui, app: &App, label: &str) -> bool {
+    big_button_painted(ui, app, label, true)
 }
 
 fn big_button_painted(ui: &mut egui::Ui, app: &App, label: &str, readable: bool) -> bool {
