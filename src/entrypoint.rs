@@ -491,8 +491,6 @@ pub(crate) fn run() -> eframe::Result<()> {
             Ok(Box::new(Shell {
                 app,
                 recovery_checked: false,
-                #[cfg(target_os = "macos")]
-                glass_haze: None,
                 #[cfg(windows)]
                 thumbbar,
                 stalls: fastframe_shell::StallWatch::default(),
@@ -639,10 +637,6 @@ struct Shell {
     app: fastframe_shell::Held<app::App>,
     /// Whether this window's first frame checked that a monitor shows it.
     recovery_checked: bool,
-    /// The player bar height the glass's haze was last kept off, in window
-    /// points (`spotifrost::mac_glass::set_player_bar`).
-    #[cfg(target_os = "macos")]
-    glass_haze: Option<f32>,
     #[cfg(windows)]
     thumbbar: spotifrost::thumbbar::ThumbBar,
     /// Logs a warning when an update freezes the window.
@@ -668,20 +662,6 @@ fn install_glass(frame: &eframe::Frame) {
     }
 }
 
-/// Keeps the glass's extra blur off the player bar the last frame drew,
-/// telling AppKit only when the bar's height in window points changes.
-#[cfg(target_os = "macos")]
-fn place_glass_haze(ctx: &egui::Context, frame: &eframe::Frame, placed: &mut Option<f32>) {
-    let height = spotifrost::ui::player_bar_height(ctx) * ctx.zoom_factor();
-    if *placed == Some(height) {
-        return;
-    }
-    if let Some(view) = ns_view(frame) {
-        spotifrost::mac_glass::set_player_bar(view, f64::from(height));
-        *placed = Some(height);
-    }
-}
-
 impl Shell {
     /// One pass of the window's logic, run under the stall watch.
     fn run_logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
@@ -692,8 +672,6 @@ impl Shell {
             #[cfg(target_os = "macos")]
             install_glass(frame);
         }
-        #[cfg(target_os = "macos")]
-        place_glass_haze(ctx, frame, &mut self.glass_haze);
         let app = &mut *self.app;
         #[cfg(target_os = "macos")]
         for command in spotifrost::mac_menu::drain_commands() {
