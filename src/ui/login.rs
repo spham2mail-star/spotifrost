@@ -634,11 +634,8 @@ pub(super) fn step_button(ui: &mut egui::Ui, app: &App, label: &str) -> bool {
 fn big_button_painted(ui: &mut egui::Ui, app: &App, label: &str, readable: bool) -> bool {
     let palette = app.palette;
     let muted = readable && !ui.is_enabled();
-    let color = if muted {
-        palette.secondary
-    } else {
-        palette.on_accent
-    };
+    let (accent, accent_hover, on_accent) = palette.primary_button();
+    let color = if muted { palette.secondary } else { on_accent };
     let galley = ui
         .painter()
         .layout_no_wrap(label.to_string(), theme::bold(15.0), color);
@@ -650,11 +647,11 @@ fn big_button_painted(ui: &mut egui::Ui, app: &App, label: &str, readable: bool)
     let fill = if muted {
         palette.surface_active
     } else if !ui.is_enabled() {
-        palette.accent.gamma_multiply(0.45)
+        accent.gamma_multiply(0.45)
     } else if response.hovered() {
-        palette.accent_hover
+        accent_hover
     } else {
-        palette.accent
+        accent
     };
     ui.painter().rect_filled(rect, 23.0, fill);
     ui.painter()

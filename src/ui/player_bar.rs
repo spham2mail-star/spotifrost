@@ -473,11 +473,12 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     let disc = slot(widths[2]);
     if loading || app.any_play_pending() {
         let mut cell = centered(ui, disc);
+        let (fill, _, on_fill) = palette.selected_button();
         theme::circle_spinner(
             &mut cell,
             36.0,
-            palette.text,
-            palette.window,
+            fill,
+            on_fill,
             &gettext(app.locale, "Loading…"),
         );
     } else {
@@ -486,19 +487,15 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
         } else {
             Icon::PlayFilled
         };
-        let hover = if palette.dark {
-            egui::Color32::WHITE
-        } else {
-            palette.text
-        };
+        let (fill, hover, on_fill) = palette.selected_button();
         let mut cell = centered(ui, disc);
         if theme::circle_button(
             &mut cell,
             icon,
             36.0,
-            palette.text,
+            fill,
             hover,
-            palette.window,
+            on_fill,
             &if playing {
                 gettext(app.locale, "Pause")
             } else {

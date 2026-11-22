@@ -36,6 +36,11 @@ pub struct Palette {
     /// it; its alpha is the strength. Transparent leaves the plain window.
     #[serde(default)]
     pub tint: Color32,
+    /// Filled buttons and selected chips are frosted glass with the text
+    /// colour on them, rather than solid accent or text colour: the glass
+    /// palette's, so nothing solid white sits on the see-through window.
+    #[serde(default)]
+    pub frosted: bool,
 }
 
 impl Palette {
@@ -59,6 +64,7 @@ impl Palette {
             overlay: Color32::from_rgb(0x22, 0x27, 0x2e),
             shadow: Color32::from_black_alpha(140),
             tint: Color32::TRANSPARENT,
+            frosted: false,
         }
     }
 
@@ -82,6 +88,7 @@ impl Palette {
             overlay: Color32::from_rgb(0xff, 0xff, 0xff),
             shadow: Color32::from_black_alpha(50),
             tint: Color32::TRANSPARENT,
+            frosted: false,
         }
     }
 
@@ -118,6 +125,7 @@ impl Palette {
                 outline: rgba(255, 255, 255, 24),
                 overlay: rgba(32, 33, 38, 246),
                 shadow: Color32::from_black_alpha(90),
+                frosted: true,
                 accent,
                 accent_hover,
                 on_accent,
@@ -133,11 +141,57 @@ impl Palette {
                 outline: rgba(0, 0, 0, 20),
                 overlay: rgba(250, 250, 252, 248),
                 shadow: Color32::from_black_alpha(40),
+                frosted: true,
                 accent,
                 accent_hover,
                 on_accent,
                 ..base
             }
+        }
+    }
+
+    /// A frosted button: its fill, its fill under the pointer and the colour
+    /// on it. Only the glass palette has these.
+    fn frost(&self) -> (Color32, Color32, Color32) {
+        let white = |alpha| Color32::from_rgba_unmultiplied(255, 255, 255, alpha);
+        if self.dark {
+            (white(46), white(72), self.text)
+        } else {
+            (white(120), white(170), self.text)
+        }
+    }
+
+    /// A primary button, such as Play on a playlist: its fill, its fill under
+    /// the pointer, and its label or icon colour. The accent colour, or
+    /// frosted glass on the glass palette.
+    pub fn primary_button(&self) -> (Color32, Color32, Color32) {
+        if self.frosted {
+            self.frost()
+        } else {
+            (self.accent, self.accent_hover, self.on_accent)
+        }
+    }
+
+    /// A selected chip or the player bar's play button: its fill, its fill
+    /// under the pointer, and its label or icon colour. The text colour with
+    /// the window's on it, or frosted glass on the glass palette, whose
+    /// window colour is nearly clear.
+    pub fn selected_button(&self) -> (Color32, Color32, Color32) {
+        if self.frosted {
+            self.frost()
+        } else {
+            let hover = if self.dark { Color32::WHITE } else { self.text };
+            (self.text, hover, self.window)
+        }
+    }
+
+    /// The colour cut out of a small solid badge, such as Explicit's E: the
+    /// window's, or a solid one where the window is see-through.
+    pub fn knockout(&self) -> Color32 {
+        match (self.frosted, self.dark) {
+            (false, _) => self.window,
+            (true, true) => Color32::from_rgb(0x10, 0x12, 0x14),
+            (true, false) => Color32::WHITE,
         }
     }
 
@@ -778,11 +832,8 @@ pub fn circle_spinner(
 /// A pill-shaped text button: filled for the primary action, outlined otherwise.
 pub fn pill_button(ui: &mut egui::Ui, palette: &Palette, label: &str, primary: bool) -> Response {
     let font = semibold(13.0);
-    let color = if primary {
-        palette.on_accent
-    } else {
-        palette.text
-    };
+    let (fill, fill_hover, on_fill) = palette.primary_button();
+    let color = if primary { on_fill } else { palette.text };
     let galley = ui.painter().layout_no_wrap(label.to_string(), font, color);
     let padding = Vec2::new(18.0, 8.0);
     let size = galley.size() + padding * 2.0;
@@ -794,11 +845,7 @@ pub fn pill_button(ui: &mut egui::Ui, palette: &Palette, label: &str, primary: b
         let hovered = response.hovered();
         let radius = rect.height() / 2.0;
         if primary {
-            let fill = if hovered {
-                palette.accent_hover
-            } else {
-                palette.accent
-            };
+            let fill = if hovered { fill_hover } else { fill };
             ui.painter().rect_filled(rect, radius, fill);
         } else {
             let stroke_color = if hovered { palette.text } else { palette.dim };
@@ -854,7 +901,8 @@ fn soft_button_inner(
     dismissible: bool,
 ) -> (Response, bool) {
     let font = medium(13.0);
-    let color = if active { palette.window } else { palette.text };
+    let (selected, _, on_selected) = palette.selected_button();
+    let color = if active { on_selected } else { palette.text };
     let galley = crate::bidi::layout_line(ui.painter(), label, font, color);
     let icon_size = 15.0;
     let icon_width = if icon.is_some() { icon_size + 6.0 } else { 0.0 };
@@ -891,7 +939,7 @@ fn soft_button_inner(
     if ui.is_rect_visible(rect) {
         let hovered = response.hovered() || over_dismiss;
         let fill = if active {
-            palette.text
+            selected
         } else if hovered {
             palette.surface_hover
         } else {

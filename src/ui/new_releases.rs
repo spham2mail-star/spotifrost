@@ -111,9 +111,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
                     ui,
                     Icon::PlayFilled,
                     56.0,
-                    palette.accent,
-                    palette.accent_hover,
-                    palette.on_accent,
+                    palette.primary_button().0,
+                    palette.primary_button().1,
+                    palette.primary_button().2,
                     &gettext(locale, "Play"),
                 )
             })

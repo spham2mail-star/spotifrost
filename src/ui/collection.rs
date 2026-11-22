@@ -346,8 +346,8 @@ pub fn actions_row(
                 theme::circle_spinner(
                     ui,
                     56.0,
-                    palette.accent,
-                    palette.on_accent,
+                    palette.primary_button().0,
+                    palette.primary_button().2,
                     &gettext(locale, "Starting…"),
                 );
             } else if ui
@@ -356,9 +356,9 @@ pub fn actions_row(
                         ui,
                         icon,
                         56.0,
-                        palette.accent,
-                        palette.accent_hover,
-                        palette.on_accent,
+                        palette.primary_button().0,
+                        palette.primary_button().1,
+                        palette.primary_button().2,
                         &if now_playing_here {
                             gettext(locale, "Pause")
                         } else {

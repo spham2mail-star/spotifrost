@@ -180,11 +180,8 @@ fn grid_play_button(
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label.clone())
     });
     if parent.hovered() || playing_here || button.has_focus() {
-        let fill = if button.hovered() {
-            app.palette.accent_hover
-        } else {
-            app.palette.accent
-        };
+        let (fill, fill_hover, on_fill) = app.palette.primary_button();
+        let fill = if button.hovered() { fill_hover } else { fill };
         ui.painter().add(
             egui::epaint::Shadow {
                 offset: [0, 4],
@@ -201,7 +198,7 @@ fn grid_play_button(
             Icon::PlayFilled
         };
         let icon_size = size * 0.42;
-        icon.image(app.palette.on_accent, icon_size).paint_at(
+        icon.image(on_fill, icon_size).paint_at(
             ui,
             Rect::from_center_size(
                 rect.center() + theme::play_glyph_offset(icon, icon_size),

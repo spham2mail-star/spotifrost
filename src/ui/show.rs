@@ -214,17 +214,17 @@ fn show_actions(
                 theme::circle_spinner(
                     ui,
                     56.0,
-                    palette.accent,
-                    palette.on_accent,
+                    palette.primary_button().0,
+                    palette.primary_button().2,
                     &gettext(locale, "Starting…"),
                 );
             } else if theme::circle_button(
                 ui,
                 Icon::PlayFilled,
                 56.0,
-                palette.accent,
-                palette.accent_hover,
-                palette.on_accent,
+                palette.primary_button().0,
+                palette.primary_button().1,
+                palette.primary_button().2,
                 &gettext(locale, "Play latest episode"),
             )
             .clicked()
@@ -372,21 +372,17 @@ pub fn episode_row(
         theme::circle_spinner(
             &mut child,
             32.0,
-            palette.text,
-            palette.window,
+            palette.selected_button().0,
+            palette.selected_button().2,
             &gettext(locale, "Starting…"),
         );
     } else if theme::circle_button(
         &mut child,
         icon,
         32.0,
-        palette.text,
-        if palette.dark {
-            egui::Color32::WHITE
-        } else {
-            palette.text
-        },
-        palette.window,
+        palette.selected_button().0,
+        palette.selected_button().1,
+        palette.selected_button().2,
         &gettext(locale, "Play"),
     )
     .clicked()

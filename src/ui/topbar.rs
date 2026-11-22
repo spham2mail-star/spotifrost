@@ -417,13 +417,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                 .to_uppercase()
                                 .to_string();
                             ui.painter()
-                                .circle_filled(inner.center(), 14.0, palette.accent);
+                                .circle_filled(inner.center(), 14.0, palette.primary_button().0);
                             ui.painter().text(
                                 inner.center(),
                                 egui::Align2::CENTER_CENTER,
                                 initial,
                                 theme::bold(13.0),
-                                palette.on_accent,
+                                palette.primary_button().2,
                             );
                         }
                     }
