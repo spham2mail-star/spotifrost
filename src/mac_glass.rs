@@ -10,10 +10,14 @@
 //! with the light or dark appearance, the wallpaper tint and Reduce
 //! Transparency by itself.
 //!
-//! Over the glass, everywhere but the player bar, lies a second, frosted
-//! layer drawn at a twentieth of its strength: the page and the sidebars
-//! blur the desktop a little more than the bar does. AppKit offers no blur
-//! radius for either material, so the extra blur is mixed in this way.
+//! Over the glass lie two frosted layers, drawn faintly: one over the whole
+//! window at a tenth of its strength, and the haze over everything but the
+//! player bar at a twentieth, so the page and the sidebars blur the desktop
+//! a little more than the bar does. AppKit offers no blur radius for either
+//! material, so the extra blur is mixed in this way.
+//!
+//! Every layer keeps its active look whether or not the window is in front,
+//! so the window looks the same focused and unfocused.
 
 use std::ffi::c_void;
 
@@ -36,11 +40,16 @@ const GLASS_STYLE_REGULAR: isize = 0;
 /// How much of the frosted material is drawn where Liquid Glass is missing;
 /// the rest is the clear desktop.
 const FROSTED_OPACITY: f64 = 0.88;
+/// How strongly the blur over the whole window is drawn: 10% more blur than
+/// the glass alone.
+const BLUR_OPACITY: f64 = 0.10;
 /// How strongly the haze over the page and sidebars is drawn: 5% more blur
 /// there than behind the player bar.
 const HAZE_OPACITY: f64 = 0.05;
 /// Marks the glass, so a window never gets two.
 const IDENTIFIER: &str = "spotifrost-glass";
+/// Marks the blur over the whole window.
+const BLUR_IDENTIFIER: &str = "spotifrost-glass-blur";
 /// Marks the haze over everything but the player bar.
 const HAZE_IDENTIFIER: &str = "spotifrost-glass-haze";
 
@@ -82,15 +91,20 @@ pub fn install(ns_view: *mut c_void) {
         }
     };
 
+    let blur = frosted(mtm, bounds);
+    blur.setAlphaValue(BLUR_OPACITY);
+    let blur_identifier = objc2_foundation::NSString::from_str(BLUR_IDENTIFIER);
     let haze = frosted(mtm, bounds);
     haze.setAlphaValue(HAZE_OPACITY);
     let haze_identifier = objc2_foundation::NSString::from_str(HAZE_IDENTIFIER);
     unsafe {
         let () = msg_send![&*glass, setAutoresizingMask: FILL];
         let () = msg_send![&*glass, setIdentifier: &*identifier];
+        let () = msg_send![&*blur, setAutoresizingMask: FILL];
+        let () = msg_send![&*blur, setIdentifier: &*blur_identifier];
         let () = msg_send![&*haze, setAutoresizingMask: FILL];
         let () = msg_send![&*haze, setIdentifier: &*haze_identifier];
-        // Bottom to top: the glass, the haze, then egui's view.
+        // Bottom to top: the glass, the blur, the haze, then egui's view.
         let () = msg_send![
             &*frame_view,
             addSubview: &*haze,
@@ -99,9 +113,15 @@ pub fn install(ns_view: *mut c_void) {
         ];
         let () = msg_send![
             &*frame_view,
-            addSubview: &*glass,
+            addSubview: &*blur,
             positioned: BELOW,
             relativeTo: &*haze
+        ];
+        let () = msg_send![
+            &*frame_view,
+            addSubview: &*glass,
+            positioned: BELOW,
+            relativeTo: &*blur
         ];
     }
     log::info!(
@@ -141,12 +161,14 @@ pub fn set_player_bar(ns_view: *mut c_void, height: f64) {
     }
 }
 
-/// The frosted material, blurring the desktop behind the window.
+/// The frosted material, blurring the desktop behind the window. It keeps
+/// its active look when the window is not in front, rather than AppKit's
+/// flatter, greyer inactive one.
 fn frosted(mtm: MainThreadMarker, frame: objc2_foundation::NSRect) -> Retained<NSVisualEffectView> {
     let view = NSVisualEffectView::initWithFrame(mtm.alloc(), frame);
     view.setMaterial(NSVisualEffectMaterial::Sidebar);
     view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-    view.setState(NSVisualEffectState::FollowsWindowActiveState);
+    view.setState(NSVisualEffectState::Active);
     view
 }
 

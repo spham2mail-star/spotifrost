@@ -110,8 +110,8 @@ impl Palette {
         };
         if dark {
             Self {
-                window: rgba(0, 0, 0, 14),
-                panel: rgba(255, 255, 255, 4),
+                window: rgba(0, 0, 0, 4),
+                panel: rgba(255, 255, 255, 2),
                 surface: rgba(255, 255, 255, 18),
                 surface_hover: rgba(255, 255, 255, 30),
                 surface_active: rgba(255, 255, 255, 44),
@@ -125,8 +125,8 @@ impl Palette {
             }
         } else {
             Self {
-                window: rgba(255, 255, 255, 20),
-                panel: rgba(255, 255, 255, 40),
+                window: rgba(255, 255, 255, 6),
+                panel: rgba(255, 255, 255, 20),
                 surface: rgba(0, 0, 0, 12),
                 surface_hover: rgba(0, 0, 0, 20),
                 surface_active: rgba(0, 0, 0, 30),
