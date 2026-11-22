@@ -646,6 +646,10 @@ pub struct App {
     /// Last list sent to local playback. Used for autoplay because librespot
     /// cannot continue a list without a context URI.
     local_list: Option<Vec<String>>,
+    /// Last plain list sent to a remote player, Soloist among them. The Web
+    /// API plays such a list and stops at its end, so autoplay is started
+    /// from its last song (`remote_autoplay_seed`).
+    remote_list: Option<Vec<String>>,
     /// Activated receiver waiting to appear in Spotify's device list.
     pending_transfer_to: Option<(String, Instant)>,
     /// When to take a confirming look at remote playback after a command.
@@ -1276,6 +1280,7 @@ impl App {
             pending_play_at: None,
             queued_play: None,
             local_list: None,
+            remote_list: None,
             pending_transfer_to: None,
             remote_recheck_at: None,
             remote_pushed_at: None,
@@ -6960,6 +6965,21 @@ impl App {
                             device.volume_percent = Some(pushed.percent);
                         }
                         self.reconcile_remote_volume(seq, state.as_ref());
+                        let elapsed = self
+                            .remote
+                            .as_ref()
+                            .map_or(0, |remote| remote.received_at.elapsed().as_millis() as u64);
+                        if let Some((seed, device_id)) = remote_autoplay_seed(
+                            self.remote_list.as_deref(),
+                            self.remote.as_ref().map(|remote| &remote.state),
+                            elapsed,
+                            state.as_ref(),
+                        ) {
+                            log::info!("the list ended on {device_id:?}; autoplay follows {seed}");
+                            self.remote_list = None;
+                            self.backend
+                                .api(ApiRequest::AutoplayOnDevice { device_id, seed });
+                        }
                         let previous_uri = self.remote.as_ref().and_then(|remote| {
                             remote
                                 .state
@@ -7302,6 +7322,15 @@ impl App {
                 }
                 self.home.new_release_tracks.refresh(result);
             }
+            ApiResponse::AutoplayStarted { seed, result } => match result {
+                Ok(songs) => {
+                    log::info!("autoplay after {seed}: {} songs", songs.len());
+                    // Its last song seeds the next round when it runs out.
+                    self.remote_list = Some(songs);
+                    self.poll_remote_soon();
+                }
+                Err(error) => log::warn!("autoplay after {seed} failed: {error}"),
+            },
             ApiResponse::HiddenSongs { generation, result } => {
                 if generation != self.hidden_songs_generation {
                     return;
@@ -9316,6 +9345,7 @@ impl App {
             }
             Target::Local => {
                 self.queued_play = None;
+                self.remote_list = None;
                 let mut load = local_load(&request, shuffle);
                 load.repeat = Some(self.local_repeat());
                 self.local_list = load.context_uri.is_none().then(|| load.uris.clone());
@@ -9351,6 +9381,8 @@ impl App {
             // playing, which a Sonos is.
             Target::Remote(device_id) => {
                 self.queued_play = None;
+                self.remote_list = (request.context_uri.is_none() && !request.uris.is_empty())
+                    .then(|| request.uris.clone());
                 if shuffle {
                     self.backend.api(ApiRequest::ShufflePlay {
                         device_id,
@@ -13466,6 +13498,47 @@ fn local_load(request: &PlayRequest, shuffle: bool) -> LoadSpec {
         repeat: None,
         autoplay: false,
     }
+}
+
+/// How late a poll may see a remote song's last moments and still count it
+/// as played out: the active poll interval and a little more.
+const REMOTE_END_SLACK_MS: u64 = 6_000;
+
+/// The last song of `list`, and the device it played on, when a remote
+/// player has just played it out and stopped: autoplay's seed. `before` is
+/// the previous poll, `elapsed_ms` since it was received, `after` this one.
+/// A pause partway through, another song, or a list Spotifrost did not send
+/// is no end.
+fn remote_autoplay_seed(
+    list: Option<&[String]>,
+    before: Option<&PlaybackState>,
+    elapsed_ms: u64,
+    after: Option<&PlaybackState>,
+) -> Option<(String, Option<String>)> {
+    let before = before.filter(|before| before.is_playing)?;
+    let item = before.item.as_ref()?;
+    let seed = list?.last()?;
+    if item.uri() != seed {
+        return None;
+    }
+    let duration = u64::from(item.duration_ms());
+    if duration == 0 {
+        return None;
+    }
+    let reached = u64::from(before.progress_ms.unwrap_or(0)) + elapsed_ms;
+    if reached + REMOTE_END_SLACK_MS < duration {
+        return None;
+    }
+    if let Some(after) = after {
+        let same_song = after.item.as_ref().is_none_or(|now| now.uri() == seed);
+        let progress = u64::from(after.progress_ms.unwrap_or(0));
+        let at_an_end = progress < 1_500 || progress + 1_500 >= duration;
+        if after.is_playing || !same_song || !at_an_end {
+            return None;
+        }
+    }
+    let device = before.device.as_ref().and_then(|device| device.id.clone());
+    Some((seed.clone(), device))
 }
 
 /// Returns the final track as the autoplay seed when a plain list ends.
@@ -29338,6 +29411,70 @@ mod tests {
         );
         assert_eq!(episode.context_uri, None);
         assert_eq!(episode.uris.len(), 1);
+    }
+
+    /// A plain list a remote player, Soloist among them, plays out seeds
+    /// autoplay with its last song on that device; a pause partway, a
+    /// paused last song, or another song does not.
+    #[test]
+    fn a_remote_list_that_ends_seeds_autoplay_on_its_device() {
+        let state = |uri: &str, playing: bool, progress: u32| PlaybackState {
+            device: Some(crate::api::models::Device {
+                id: Some("soloist".into()),
+                ..Default::default()
+            }),
+            is_playing: playing,
+            progress_ms: Some(progress),
+            item: Some(PlayableItem::Track(Track {
+                uri: uri.into(),
+                duration_ms: 200_000,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let list = vec!["spotify:track:song".to_string()];
+        let near_end = state("spotify:track:song", true, 197_000);
+        let stopped = state("spotify:track:song", false, 0);
+        assert_eq!(
+            remote_autoplay_seed(Some(&list), Some(&near_end), 2_000, Some(&stopped)),
+            Some(("spotify:track:song".into(), Some("soloist".into())))
+        );
+        // Spotify may report nothing playing at all once the list is done.
+        assert!(remote_autoplay_seed(Some(&list), Some(&near_end), 2_000, None).is_some());
+        // Not a list Spotifrost sent, or not its last song.
+        assert_eq!(
+            remote_autoplay_seed(None, Some(&near_end), 2_000, Some(&stopped)),
+            None
+        );
+        let other = state("spotify:track:other", true, 197_000);
+        assert_eq!(
+            remote_autoplay_seed(Some(&list), Some(&other), 2_000, Some(&stopped)),
+            None
+        );
+        // Paused partway through.
+        let midway = state("spotify:track:song", true, 60_000);
+        let paused = state("spotify:track:song", false, 62_000);
+        assert_eq!(
+            remote_autoplay_seed(Some(&list), Some(&midway), 2_000, Some(&paused)),
+            None
+        );
+        // Paused a few seconds before the end.
+        let late_pause = state("spotify:track:song", false, 196_000);
+        assert_eq!(
+            remote_autoplay_seed(Some(&list), Some(&near_end), 2_000, Some(&late_pause)),
+            None
+        );
+        // Still playing, or something else playing now.
+        let still = state("spotify:track:song", true, 199_500);
+        assert_eq!(
+            remote_autoplay_seed(Some(&list), Some(&near_end), 2_000, Some(&still)),
+            None
+        );
+        let next = state("spotify:track:next", false, 0);
+        assert_eq!(
+            remote_autoplay_seed(Some(&list), Some(&near_end), 2_000, Some(&next)),
+            None
+        );
     }
 
     /// A plain list that plays out seeds autoplay with its last song; a

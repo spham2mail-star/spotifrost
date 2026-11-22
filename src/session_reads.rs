@@ -3248,3 +3248,115 @@ mod tests {
         );
     }
 }
+
+/// The most songs one round of autoplay hands a player.
+pub const AUTOPLAY_SONGS: usize = 50;
+
+/// The songs Spotify's autoplay would follow `seed` with, as its own apps
+/// play them when a song or list ends: up to [`AUTOPLAY_SONGS`] track URIs,
+/// without `seed` itself. A player sent a plain list through the Web API,
+/// Soloist among them, stops at its end; this is what continues it.
+pub async fn autoplay_tracks(session: &Session, seed: &str) -> anyhow::Result<Vec<String>> {
+    use librespot_protocol::autoplay_context_request::AutoplayContextRequest;
+    let request = AutoplayContextRequest {
+        context_uri: Some(seed.to_string()),
+        recent_track_uri: vec![seed.to_string()],
+        ..Default::default()
+    };
+    let context = session.spclient().get_autoplay_context(&request).await?;
+    let mut songs = Vec::new();
+    let mut more = Vec::new();
+    collect_autoplay(&context.pages, seed, &mut songs, &mut more);
+    // Autoplay can answer with where its songs are rather than the songs.
+    for uri in more {
+        if songs.len() >= AUTOPLAY_SONGS {
+            break;
+        }
+        let page = session.spclient().get_context(&uri).await?;
+        collect_autoplay(&page.pages, seed, &mut songs, &mut Vec::new());
+    }
+    songs.truncate(AUTOPLAY_SONGS);
+    anyhow::ensure!(
+        !songs.is_empty(),
+        "Spotify suggested nothing to follow {seed}"
+    );
+    Ok(songs)
+}
+
+/// Adds the songs on autoplay's `pages` to `songs`, once each and never
+/// `seed`, and the context URI of each page that only says where its songs
+/// are to `more`.
+fn collect_autoplay(
+    pages: &[librespot_protocol::context_page::ContextPage],
+    seed: &str,
+    songs: &mut Vec<String>,
+    more: &mut Vec<String>,
+) {
+    for page in pages {
+        if page.tracks.is_empty() {
+            if let Some(url) = page.page_url.as_deref().filter(|url| !url.is_empty()) {
+                more.push(page_context_uri(url));
+            }
+            continue;
+        }
+        for track in &page.tracks {
+            let Some(uri) = track.uri.as_deref() else {
+                continue;
+            };
+            if uri.starts_with("spotify:track:") && uri != seed && !songs.iter().any(|s| s == uri) {
+                songs.push(uri.to_string());
+            }
+        }
+    }
+}
+
+/// The context URI a page URL names, as librespot reads it:
+/// `hm://service/v1/page/spotify/station/track/ID` is
+/// `spotify:station:track`… taken three parts from `spotify`.
+fn page_context_uri(url: &str) -> String {
+    url.strip_prefix("hm://")
+        .unwrap_or(url)
+        .split('/')
+        .skip_while(|part| *part != "spotify")
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+#[cfg(test)]
+mod autoplay_tests {
+    use super::*;
+    use librespot_protocol::context_page::ContextPage;
+    use librespot_protocol::context_track::ContextTrack;
+
+    fn track(uri: &str) -> ContextTrack {
+        ContextTrack {
+            uri: Some(uri.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn autoplay_keeps_songs_once_and_never_the_seed() {
+        let pages = [
+            ContextPage {
+                tracks: vec![
+                    track("spotify:track:seed"),
+                    track("spotify:track:a"),
+                    track("spotify:episode:e"),
+                    track("spotify:track:a"),
+                    track("spotify:track:b"),
+                ],
+                ..Default::default()
+            },
+            ContextPage {
+                page_url: Some("hm://autoplay/v1/page/spotify/album/xyz/extra".into()),
+                ..Default::default()
+            },
+        ];
+        let (mut songs, mut more) = (Vec::new(), Vec::new());
+        collect_autoplay(&pages, "spotify:track:seed", &mut songs, &mut more);
+        assert_eq!(songs, ["spotify:track:a", "spotify:track:b"]);
+        assert_eq!(more, ["spotify:album:xyz"]);
+    }
+}

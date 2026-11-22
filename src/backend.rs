@@ -201,6 +201,12 @@ pub enum ApiRequest {
     HiddenSongs {
         generation: u64,
     },
+    /// Play what Spotify's autoplay follows `seed` with on `device_id`, a
+    /// player that went quiet at the end of a plain list Spotifrost sent it.
+    AutoplayOnDevice {
+        device_id: Option<String>,
+        seed: String,
+    },
     /// Hide a song in one of Spotify's playlists, or show it again.
     SetHiddenInPlaylist {
         playlist_uri: String,
@@ -465,6 +471,11 @@ pub enum ApiResponse {
     HiddenSongs {
         generation: u64,
         result: ApiResult<Vec<(String, String)>>,
+    },
+    /// Autoplay started on a device after `seed`, with these songs.
+    AutoplayStarted {
+        seed: String,
+        result: ApiResult<Vec<String>>,
     },
     HiddenInPlaylistSet {
         playlist_uri: String,
@@ -4685,6 +4696,7 @@ fn operation_for(api: &ApiGateway, request: &ApiRequest) -> Operation {
         ApiRequest::HiddenSongs { .. } | ApiRequest::SetHiddenInPlaylist { .. } => {
             Operation::UserData
         }
+        ApiRequest::AutoplayOnDevice { .. } => Operation::Playback,
         ApiRequest::SearchCatalogue { .. } => Operation::CatalogSearch,
         ApiRequest::Search { .. } => Operation::PlaylistSearch,
         ApiRequest::PlaySearch { kind, .. } if kind == "playlist" => Operation::PlaylistSearch,
@@ -4941,6 +4953,32 @@ async fn read_new_release_tracks(
 }
 
 /// The playback session of the signed-in account, for what only it can do.
+/// Asks the streaming session for the songs Spotify's autoplay follows
+/// `seed` with, and plays them on `device_id` through the Web API, which is
+/// how a remote player, Soloist among them, takes a list.
+async fn autoplay_on_device(
+    api: &ApiGateway,
+    engine: Option<&Engine>,
+    device_id: Option<&str>,
+    seed: &str,
+) -> ApiResult<Vec<String>> {
+    let session = engine
+        .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+        .map(Engine::session)
+        .ok_or_else(|| ApiError::Status {
+            status: 503,
+            message: "Autoplay needs Spotifrost's own Spotify connection.".into(),
+        })?;
+    let songs = session_reads::autoplay_tracks(session, seed)
+        .await
+        .map_err(|error| ApiError::Network(format!("{error:#}")))?;
+    let client = api.client_for(Operation::Playback).await?;
+    client
+        .play(device_id, Some(&PlayRequest::tracks(songs.clone())))
+        .await?;
+    Ok(songs)
+}
+
 fn playback_session<'a>(
     api: &ApiGateway,
     engine: Option<&'a Engine>,
@@ -5097,6 +5135,10 @@ async fn handle(
             expired,
         );
     }
+    if let ApiRequest::AutoplayOnDevice { device_id, seed } = request {
+        let result = autoplay_on_device(api, engine, device_id.as_deref(), &seed).await;
+        return (ApiResponse::AutoplayStarted { seed, result }, Vec::new());
+    }
     if let ApiRequest::HiddenSongs { generation } = request {
         let result = match playback_session(api, engine) {
             Ok(session) => {
@@ -5247,6 +5289,7 @@ async fn handle(
         | ApiRequest::NewReleases { .. }
         | ApiRequest::NewReleaseTracks { .. }
         | ApiRequest::HiddenSongs { .. }
+        | ApiRequest::AutoplayOnDevice { .. }
         | ApiRequest::SetHiddenInPlaylist { .. } => unreachable!("handled before Web API routing"),
         ApiRequest::MyPlaylists { offset, generation } => ApiResponse::MyPlaylists {
             offset,
