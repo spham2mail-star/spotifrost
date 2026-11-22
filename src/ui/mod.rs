@@ -29,9 +29,25 @@ use crate::backend::AuthStatus;
 use crate::model::{Action, Loadable, Page, ToastKind};
 use crate::theme::{self, Icon};
 
+/// Where the window's glass keeps the player bar clear of its haze.
+const GLASS_BAR_ID: &str = "glass-player-bar-height";
+
+/// The height of the player bar this frame drew, in egui points, or `0.0`
+/// on the screens without one. The glass on macOS blurs a little more
+/// everywhere else (`crate::mac_glass::set_player_bar`).
+pub fn player_bar_height(ctx: &Context) -> f32 {
+    ctx.data(|data| data.get_temp::<f32>(Id::new(GLASS_BAR_ID)))
+        .unwrap_or(0.0)
+}
+
+fn set_player_bar_height(ctx: &Context, height: f32) {
+    ctx.data_mut(|data| data.insert_temp(Id::new(GLASS_BAR_ID), height));
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let ctx = &ctx;
+    set_player_bar_height(ctx, 0.0);
     keys::handle(app, ctx);
     let signed_in = app.is_connected() && app.user.is_some();
     let connecting = matches!(app.auth, AuthStatus::Connecting | AuthStatus::Starting)
@@ -70,6 +86,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         );
     }
     player_bar::show(app, ui);
+    set_player_bar_height(ctx, theme::PLAYER_BAR_HEIGHT);
     if app.settings.sidebar_visible {
         sidebar::show(app, ui);
     }
