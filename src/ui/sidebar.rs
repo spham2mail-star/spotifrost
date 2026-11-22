@@ -182,15 +182,19 @@ fn grid_play_button(
     if parent.hovered() || playing_here || button.has_focus() {
         let (fill, fill_hover, on_fill) = app.palette.primary_button();
         let fill = if button.hovered() { fill_hover } else { fill };
-        ui.painter().add(
-            egui::epaint::Shadow {
-                offset: [0, 4],
-                blur: 12,
-                spread: 0,
-                color: egui::Color32::from_black_alpha(90),
-            }
-            .as_shape(rect, egui::CornerRadius::same(127)),
-        );
+        // A frosted button is see-through, so a shadow under it would show
+        // through as a dark shade.
+        if !app.palette.frosted {
+            ui.painter().add(
+                egui::epaint::Shadow {
+                    offset: [0, 4],
+                    blur: 12,
+                    spread: 0,
+                    color: egui::Color32::from_black_alpha(90),
+                }
+                .as_shape(rect, egui::CornerRadius::same(127)),
+            );
+        }
         ui.painter().circle_filled(rect.center(), size / 2.0, fill);
         let icon = if playing {
             Icon::PauseFilled
