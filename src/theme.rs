@@ -85,7 +85,7 @@ impl Palette {
         }
     }
 
-    /// The glass: see-through surfaces over the window's frosted material,
+    /// The glass: see-through surfaces over the window's Liquid Glass,
     /// in light or `dark`, drawn with the system `accent` where there is one.
     /// The material underneath does the blurring and the wallpaper tint;
     /// these only shade it, so text keeps its contrast. Menus and dialogs

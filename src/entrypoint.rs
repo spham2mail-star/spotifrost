@@ -491,6 +491,8 @@ pub(crate) fn run() -> eframe::Result<()> {
             Ok(Box::new(Shell {
                 app,
                 recovery_checked: false,
+                #[cfg(target_os = "macos")]
+                glass_haze: None,
                 #[cfg(windows)]
                 thumbbar,
                 stalls: fastframe_shell::StallWatch::default(),
@@ -637,24 +639,46 @@ struct Shell {
     app: fastframe_shell::Held<app::App>,
     /// Whether this window's first frame checked that a monitor shows it.
     recovery_checked: bool,
+    /// The player bar height the glass's haze was last kept off, in window
+    /// points (`spotifrost::mac_glass::set_player_bar`).
+    #[cfg(target_os = "macos")]
+    glass_haze: Option<f32>,
     #[cfg(windows)]
     thumbbar: spotifrost::thumbbar::ThumbBar,
     /// Logs a warning when an update freezes the window.
     stalls: fastframe_shell::StallWatch,
 }
 
-/// Puts the frosted material behind this window (`spotifrost::mac_glass`).
+/// The view egui draws this window into.
+#[cfg(target_os = "macos")]
+fn ns_view(frame: &eframe::Frame) -> Option<*mut std::ffi::c_void> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let handle = frame.winit_window()?.window_handle().ok()?;
+    match handle.as_raw() {
+        RawWindowHandle::AppKit(appkit) => Some(appkit.ns_view.as_ptr()),
+        _ => None,
+    }
+}
+
+/// Puts the glass behind this window (`spotifrost::mac_glass`).
 #[cfg(target_os = "macos")]
 fn install_glass(frame: &eframe::Frame) {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    let Some(window) = frame.winit_window() else {
+    if let Some(view) = ns_view(frame) {
+        spotifrost::mac_glass::install(view);
+    }
+}
+
+/// Keeps the glass's extra blur off the player bar the last frame drew,
+/// telling AppKit only when the bar's height in window points changes.
+#[cfg(target_os = "macos")]
+fn place_glass_haze(ctx: &egui::Context, frame: &eframe::Frame, placed: &mut Option<f32>) {
+    let height = spotifrost::ui::player_bar_height(ctx) * ctx.zoom_factor();
+    if *placed == Some(height) {
         return;
-    };
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
-    if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
-        spotifrost::mac_glass::install(appkit.ns_view.as_ptr());
+    }
+    if let Some(view) = ns_view(frame) {
+        spotifrost::mac_glass::set_player_bar(view, f64::from(height));
+        *placed = Some(height);
     }
 }
 
@@ -668,6 +692,8 @@ impl Shell {
             #[cfg(target_os = "macos")]
             install_glass(frame);
         }
+        #[cfg(target_os = "macos")]
+        place_glass_haze(ctx, frame, &mut self.glass_haze);
         let app = &mut *self.app;
         #[cfg(target_os = "macos")]
         for command in spotifrost::mac_menu::drain_commands() {
