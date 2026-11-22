@@ -663,12 +663,15 @@ fn ns_view(frame: &eframe::Frame) -> Option<*mut std::ffi::c_void> {
 /// Puts the glass behind this window (`spotifrost::mac_glass`), tinted for
 /// `dark` or light mode, and again only when that changes.
 #[cfg(target_os = "macos")]
-fn place_glass(frame: &eframe::Frame, dark: bool, placed: &mut Option<bool>) {
+fn place_glass(ctx: &egui::Context, frame: &eframe::Frame, dark: bool, placed: &mut Option<bool>) {
     if *placed == Some(dark) {
         return;
     }
     if let Some(view) = ns_view(frame) {
         spotifrost::mac_glass::install(view, dark);
+        if let Some(radius) = spotifrost::mac_glass::corner_radius(view) {
+            spotifrost::ui::glass::set_corner_radius(ctx, radius as f32);
+        }
         *placed = Some(dark);
     }
 }
@@ -682,7 +685,7 @@ impl Shell {
             fastframe_shell::window::recover_offscreen(ctx, frame);
         }
         #[cfg(target_os = "macos")]
-        place_glass(frame, self.app.palette.dark, &mut self.glass_dark);
+        place_glass(ctx, frame, self.app.palette.dark, &mut self.glass_dark);
         let app = &mut *self.app;
         #[cfg(target_os = "macos")]
         for command in spotifrost::mac_menu::drain_commands() {
@@ -758,6 +761,9 @@ impl Shell {
     fn draw(&mut self, ui: &mut egui::Ui) {
         let app = &mut *self.app;
         app.frame_ui(ui);
+        // The edge highlight and text shadows of the glass, over everything
+        // the frame drew.
+        spotifrost::ui::glass::finish(ui.ctx(), &app.palette);
         #[cfg(windows)]
         self.thumbbar
             .sync(app.thumb_state(ui.ctx().system_theme() != Some(egui::Theme::Light)));

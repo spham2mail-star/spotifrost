@@ -72,6 +72,27 @@ pub fn install(ns_view: *mut c_void, dark: bool) {
     }
 }
 
+/// The radius of the window's rounded corners, in points, for the highlight
+/// along its edge. AppKit only says through a private property, read here
+/// when the window answers it; `None` otherwise.
+pub fn corner_radius(ns_view: *mut c_void) -> Option<f64> {
+    MainThreadMarker::new()?;
+    if ns_view.is_null() {
+        return None;
+    }
+    // SAFETY: winit hands out its live NSView, on the main thread.
+    let view: &NSView = unsafe { &*ns_view.cast::<NSView>() };
+    let window: Option<Retained<NSWindow>> = unsafe { msg_send![view, window] };
+    let window = window?;
+    let selector = objc2::sel!(_cornerRadius);
+    let answers: bool = unsafe { msg_send![&*window, respondsToSelector: selector] };
+    if !answers {
+        return None;
+    }
+    let radius: f64 = unsafe { msg_send![&*window, _cornerRadius] };
+    (radius.is_finite() && radius > 0.0 && radius < 100.0).then_some(radius)
+}
+
 /// The accent colour chosen in System Settings → Appearance, as sRGB.
 /// `None` when AppKit cannot say, and the interface keeps its own.
 pub fn accent() -> Option<[u8; 3]> {
