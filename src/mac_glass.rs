@@ -10,9 +10,10 @@
 //! with the light or dark appearance, the wallpaper tint and Reduce
 //! Transparency by itself.
 //!
-//! Over the glass lie two frosted layers, drawn faintly: one over the whole
-//! window at a tenth of its strength, and the haze over everything but the
-//! player bar at a twentieth, so the page and the sidebars blur the desktop
+//! Over the glass lie two frosted layers, drawn faintly and always in the
+//! light material, so they lift the glass rather than grey it: one over the
+//! whole window at 15% of its strength, and the haze over everything but the
+//! player bar at 5%, so the page and the sidebars blur the desktop
 //! a little more than the bar does. AppKit offers no blur radius for either
 //! material, so the extra blur is mixed in this way.
 //!
@@ -40,9 +41,9 @@ const GLASS_STYLE_REGULAR: isize = 0;
 /// How much of the frosted material is drawn where Liquid Glass is missing;
 /// the rest is the clear desktop.
 const FROSTED_OPACITY: f64 = 0.88;
-/// How strongly the blur over the whole window is drawn: 10% more blur than
+/// How strongly the blur over the whole window is drawn: 15% more blur than
 /// the glass alone.
-const BLUR_OPACITY: f64 = 0.10;
+const BLUR_OPACITY: f64 = 0.15;
 /// How strongly the haze over the page and sidebars is drawn: 5% more blur
 /// there than behind the player bar.
 const HAZE_OPACITY: f64 = 0.05;
@@ -92,9 +93,11 @@ pub fn install(ns_view: *mut c_void) {
     };
 
     let blur = frosted(mtm, bounds);
+    lighten(&blur);
     blur.setAlphaValue(BLUR_OPACITY);
     let blur_identifier = objc2_foundation::NSString::from_str(BLUR_IDENTIFIER);
     let haze = frosted(mtm, bounds);
+    lighten(&haze);
     haze.setAlphaValue(HAZE_OPACITY);
     let haze_identifier = objc2_foundation::NSString::from_str(HAZE_IDENTIFIER);
     unsafe {
@@ -170,6 +173,25 @@ fn frosted(mtm: MainThreadMarker, frame: objc2_foundation::NSRect) -> Retained<N
     view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
     view.setState(NSVisualEffectState::Active);
     view
+}
+
+/// Draws `view` in the light material even in dark mode, so the layers over
+/// the glass add blur in a pale tone rather than a grey one.
+fn lighten(view: &NSVisualEffectView) {
+    let Some(class) = AnyClass::get(c"NSAppearance") else {
+        return;
+    };
+    for name in ["NSAppearanceNameVibrantLight", "NSAppearanceNameAqua"] {
+        let name = objc2_foundation::NSString::from_str(name);
+        let appearance: Option<Retained<AnyObject>> =
+            unsafe { msg_send![class, appearanceNamed: &*name] };
+        if let Some(appearance) = appearance {
+            unsafe {
+                let () = msg_send![view, setAppearance: &*appearance];
+            }
+            return;
+        }
+    }
 }
 
 /// egui's view, its window and the window's frame view, which holds both.
