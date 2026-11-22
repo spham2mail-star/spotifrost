@@ -18,7 +18,8 @@
 //! material, so the extra blur is mixed in this way.
 //!
 //! Every layer keeps its active look whether or not the window is in front,
-//! so the window looks the same focused and unfocused.
+//! and the window draws no shadow, so it looks the same focused and
+//! unfocused and has no dark rim around its edge.
 
 use std::ffi::c_void;
 
@@ -70,6 +71,10 @@ pub fn install(ns_view: *mut c_void) {
 
     window.setOpaque(false);
     window.setBackgroundColor(Some(&NSColor::clearColor()));
+    // The shadow draws a dark rim around the window's edge, and deepens
+    // while the window is in front, so the window would change shade as it
+    // is clicked. Without it the edge is seamless, like the Dock's.
+    window.setHasShadow(false);
 
     #[allow(unused_unsafe)]
     let bounds = unsafe { frame_view.bounds() };
